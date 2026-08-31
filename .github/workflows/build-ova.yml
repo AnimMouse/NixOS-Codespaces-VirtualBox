@@ -1,0 +1,21 @@
+# PHASE 4 ONLY — stubbed on purpose.
+#
+# The intent is `nix build .#vbox` producing an OVA so that recreating the VM
+# drops from ~30 minutes to ~2. Per §9 this must not be wired up until Phase 1
+# is proven on real hardware: a CI-built image from an unproven config is worse
+# than no image, because it fails later and less legibly.
+#
+# Manual dispatch only, and it does nothing yet.
+name: build-ova
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Not implemented
+        run: |
+          echo "Phase 4 stub. Implement nix build .#vbox once Phase 1 is proven."
+          exit 0
