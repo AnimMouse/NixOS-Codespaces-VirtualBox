@@ -1,0 +1,311 @@
+# codespace — bring dev containers up and down, Codespaces style.
+#
+#   codespace up <url|path|name>   create/start a dev container and its editor
+#   codespace down <name>          stop it (the CLI has no `down` of its own)
+#   codespace list                 what exists, on which port
+#   codespace logs <name>          editor log, for when the URL does not answer
+#
+# No shebang: this is built by modules/codespace.nix with
+# pkgs.writeShellApplication, which supplies one and runs shellcheck.
+
+PORT_MIN=8001
+PORT_MAX=8010
+REPOS=/persist/repos
+STATE=/persist/codespace
+PW_FILE=/persist/code-server/pw
+EDITOR_PORT=8080
+
+die() { echo "codespace: $*" >&2; exit 1; }
+# Progress goes to stderr so that functions which echo a result can be used in
+# a command substitution without their chatter landing in the result.
+note() { echo "==> $*" >&2; }
+
+usage() {
+  cat >&2 <<'USAGE'
+usage:
+  codespace up <url|path|name>   create/start a dev container and its editor
+  codespace rebuild <name|path>  recreate it from scratch, keeping the port
+  codespace down <name>          stop it
+  codespace list                 what exists, on which port
+  codespace logs <name>          editor log, for when the URL does not answer
+USAGE
+  exit "${1:-1}"
+}
+
+# Container-safe name: docker labels and systemd unit instances both dislike
+# most punctuation.
+slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's![^a-z0-9._-]!-!g; s!^-*!!; s!-*$!!'; }
+
+# Accepts a git URL, an absolute path, or the name of something already in
+# /persist/repos. Echoes "<name> <workspace-folder>".
+resolve_workspace() {
+  local target="$1" name dir
+
+  # A codespace that already exists is addressable by name alone, so that
+  # `up`/`rebuild` take the same argument as `down`/`logs` once it is created.
+  name=$(slugify "$target")
+  if [ -f "$STATE/$name/workspace" ]; then
+    dir=$(cat "$STATE/$name/workspace")
+    if [ -d "$dir" ]; then
+      echo "$name $dir"; return
+    fi
+  fi
+
+  if [ -d "$target" ]; then
+    dir=$(realpath "$target")
+    name=$(slugify "$(basename "$dir")")
+    echo "$name $dir"; return
+  fi
+
+  if [ -d "$REPOS/$target" ]; then
+    name=$(slugify "$target")
+    echo "$name $REPOS/$target"; return
+  fi
+
+  case "$target" in
+    *://*|*@*:*|github.com/*|gitlab.com/*) ;;
+    *) die "no such repo '$target' — give a git URL, a path, or a name under $REPOS" ;;
+  esac
+
+  local url="$target"
+  case "$url" in
+    github.com/*|gitlab.com/*) url="https://$url" ;;
+  esac
+
+  name=$(slugify "$(basename "${url%.git}")")
+  dir="$REPOS/$name"
+  if [ ! -d "$dir" ]; then
+    note "cloning $url -> $dir"
+    git clone "$url" "$dir" >&2 || die "clone failed"
+  fi
+  echo "$name $dir"
+}
+
+port_in_use() {
+  local port="$1" other
+  for other in "$STATE"/*/port; do
+    [ -e "$other" ] || continue
+    [ "$(dirname "$other")" = "$STATE/$2" ] && continue
+    [ "$(cat "$other")" = "$port" ] && return 0
+  done
+  return 1
+}
+
+# Sticky: a codespace keeps its port, so bookmarks survive a down/up.
+allocate_port() {
+  local name="$1" port
+  if [ -f "$STATE/$name/port" ]; then
+    cat "$STATE/$name/port"; return
+  fi
+  for port in $(seq "$PORT_MIN" "$PORT_MAX"); do
+    if ! port_in_use "$port" "$name"; then
+      echo "$port"; return
+    fi
+  done
+  die "all ports $PORT_MIN-$PORT_MAX are taken; 'codespace list' then 'codespace down' one"
+}
+
+container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
+container_any() { docker ps -aq --filter "label=codespace=$1" | head -1; }
+
+editor_password() {
+  [ -r "$PW_FILE" ] || die "$PW_FILE missing — is the code-server module active?"
+  cat "$PW_FILE"
+}
+
+cmd_up() {
+  [ $# -ge 1 ] || usage
+  local name ws port cid remote_user resolved recreate="${2:-}"
+  # Not inlined into the read: a die() inside a command substitution cannot
+  # stop the caller, so the status has to be checked here.
+  resolved=$(resolve_workspace "$1") || exit 1
+  read -r name ws <<<"$resolved"
+  [ -n "$name" ] || die "could not work out a name for '$1'"
+
+  mkdir -p "$STATE/$name"
+  port=$(allocate_port "$name")
+  echo "$port" > "$STATE/$name/port"
+  echo "$ws" > "$STATE/$name/workspace"
+
+  local -a args=(
+    up
+    --workspace-folder "$ws"
+    --id-label "codespace=$name"
+  )
+  [ "$recreate" = recreate ] && args+=(--remove-existing-container)
+
+  # Git credentials inside the container (CLAUDE.md §8).
+  #
+  # A key file under /persist/git is tried first because its path is stable.
+  # Agent forwarding leaks no key at all and would otherwise be the better
+  # option, but $SSH_AUTH_SOCK points at a per-session directory: a container
+  # created during one SSH session holds a bind mount to a socket that is dead
+  # by the next login, and git then fails in a way that looks like a key
+  # problem. So it is the fallback, not the default.
+  #
+  # Neither mount can be read-only: the CLI validates --mount strictly as
+  # type/source/target/external and rejects `readonly`. /persist/git limits the
+  # exposure to one key, rather than all of ~/.ssh or the host keys.
+  # Glob into an array rather than `compgen -G`: nixpkgs builds bash without
+  # programmable completion, so compgen does not exist and the test silently
+  # takes the wrong branch. With nullglob unset, a pattern that matches nothing
+  # survives literally and fails -e.
+  local git_want=""
+  local -a git_keys=(/persist/git/id_*)
+  if [ -e "${git_keys[0]}" ]; then
+    args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
+    git_want="keyfile"
+  elif [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
+    args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=/tmp/ssh-agent.sock")
+    git_want="agent"
+  fi
+
+  # Dotfiles: a plain-bash repo targeting Debian userland, the same mechanism
+  # real Codespaces uses (CLAUDE.md §6). Optional.
+  if [ -r "$STATE/config" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE/config"
+  fi
+  if [ -n "${DOTFILES_REPOSITORY:-}" ]; then
+    args+=(--dotfiles-repository "$DOTFILES_REPOSITORY")
+    [ -n "${DOTFILES_INSTALL_COMMAND:-}" ] && args+=(--dotfiles-install-command "$DOTFILES_INSTALL_COMMAND")
+  fi
+
+  note "starting dev container '$name' from $ws"
+  devcontainer "${args[@]}" || die "devcontainer up failed"
+
+  cid=$(container_of "$name")
+  [ -n "$cid" ] || die "container did not come up"
+
+  # What the container actually has, not what the host happened to offer. `up`
+  # reuses an existing container and silently ignores changed --mount flags, so
+  # trusting git_want here would configure the editor for a mount that is not
+  # there.
+  local mounts git_ssh=""
+  mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$cid")
+  case " $mounts " in
+    *" /tmp/ssh-agent.sock "*) git_ssh="agent" ;;
+    *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
+  esac
+  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ]; then
+    note "note: this container was created with git credentials '$git_ssh:-none';"
+    note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
+  fi
+
+  remote_user=$(devcontainer exec --workspace-folder "$ws" --id-label "codespace=$name" \
+    sh -c 'id -un' 2>/dev/null | tr -d '\r' | tail -1)
+  [ -n "$remote_user" ] || remote_user=root
+
+  # Installed after every `up`, not baked in as a feature: no third-party
+  # feature for code-server resolves on ghcr, and doing it here leaves the
+  # project's devcontainer.json untouched so it stays portable to real
+  # Codespaces. `--method standalone` avoids apt, so this works on any glibc
+  # base image. Recreating the container discards it, hence the check.
+  note "ensuring code-server is installed"
+  docker exec -u "$remote_user" "$cid" bash -lc \
+    'command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo sh -s -- --method standalone --prefix /usr/local' \
+    || die "could not install code-server in the container"
+
+  # Login shells get the git env too; the editor's own terminals inherit it
+  # from the code-server process below.
+  local envfile
+  envfile=$(mktemp)
+  {
+    echo "export CODESPACE_NAME=$name"
+    case "$git_ssh" in
+      agent)   echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock' ;;
+      keyfile) echo 'export GIT_SSH_COMMAND="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"' ;;
+    esac
+  } > "$envfile"
+  docker cp "$envfile" "$cid:/etc/profile.d/codespace.sh" >/dev/null
+  docker exec -u root "$cid" chmod 0644 /etc/profile.d/codespace.sh
+  rm -f "$envfile"
+
+  if ! docker exec "$cid" pgrep -f "code-server.*--bind-addr" >/dev/null 2>&1; then
+    note "starting editor"
+    local -a envargs=(-e "PASSWORD=$(editor_password)")
+    case "$git_ssh" in
+      agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock) ;;
+      keyfile) envargs+=(-e "GIT_SSH_COMMAND=ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes") ;;
+    esac
+    docker exec -d -u "$remote_user" "${envargs[@]}" "$cid" bash -lc \
+      "exec code-server --bind-addr 0.0.0.0:$EDITOR_PORT --auth password \
+         --disable-telemetry --disable-update-check \
+         >/tmp/code-server.log 2>&1"
+  fi
+
+  # The CLI has no way to publish a port on a container it creates, so the
+  # editor is reached through a proxy on the VM. See modules/codespace.nix.
+  sudo systemctl restart "codespace-proxy@$name.service"
+
+  note "waiting for the editor"
+  local i
+  for i in $(seq 1 30); do
+    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/login" 2>/dev/null; then break; fi
+    [ "$i" = 30 ] && die "editor did not answer on port $port — try 'codespace logs $name'"
+    sleep 1
+  done
+
+  echo
+  echo "  $name is up"
+  echo "  http://localhost:$port/"
+  echo "  password: $(editor_password)"
+  [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded"
+  [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
+  [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
+  echo
+  echo "  F1 opens the command palette. Ctrl+Shift+P is a Firefox private window."
+}
+
+cmd_down() {
+  [ $# -ge 1 ] || usage
+  local name cid
+  name=$(slugify "$1")
+  sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
+  cid=$(container_of "$name")
+  if [ -n "$cid" ]; then
+    note "stopping $name"
+    docker stop "$cid" >/dev/null
+  else
+    note "$name is not running"
+  fi
+}
+
+cmd_list() {
+  local dir name port cid status
+  printf '%-24s %-6s %-10s %s\n' NAME PORT STATE URL
+  for dir in "$STATE"/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    [ -f "$dir/port" ] || continue
+    port=$(cat "$dir/port")
+    cid=$(container_of "$name")
+    if [ -n "$cid" ]; then status=running
+    elif [ -n "$(container_any "$name")" ]; then status=stopped
+    else status=absent; fi
+    printf '%-24s %-6s %-10s %s\n' "$name" "$port" "$status" "http://localhost:$port/"
+  done
+}
+
+cmd_logs() {
+  [ $# -ge 1 ] || usage
+  local name cid
+  name=$(slugify "$1")
+  cid=$(container_of "$name") || true
+  [ -n "$cid" ] || die "$name is not running"
+  docker exec "$cid" cat /tmp/code-server.log
+}
+
+[ $# -ge 1 ] || usage 0
+sub="$1"; shift
+case "$sub" in
+  up)    cmd_up "$@" ;;
+  rebuild)
+         [ $# -ge 1 ] || usage
+         cmd_up "$1" recreate ;;
+  down)  cmd_down "$@" ;;
+  list|ls) cmd_list "$@" ;;
+  logs)  cmd_logs "$@" ;;
+  -h|--help|help) usage 0 ;;
+  *)     die "unknown command '$sub' (try: up, down, list, logs)" ;;
+esac

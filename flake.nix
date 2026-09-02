@@ -31,6 +31,9 @@
 
           ./hosts/dev/configuration.nix
           ./modules/persist.nix
+          ./modules/docker.nix
+          ./modules/code-server.nix
+          ./modules/codespace.nix
         ];
       };
 
