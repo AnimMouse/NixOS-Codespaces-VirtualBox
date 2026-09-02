@@ -4,11 +4,10 @@ Building the VM from the official NixOS 26.05 minimal ISO. At the end of this
 you have a headless machine you can SSH into on `127.0.0.1:2222`, with a
 `/persist` disk that survives having the system disk deleted.
 
-This config has been evaluated and built against the pinned nixpkgs revision in
-`flake.lock` (26.05.20260829, Linux 6.18.48), and both disko entry points have
-been dry-run. What is *not* verified is anything that only happens on real
-hardware: that GRUB boots, that VirtualBox presents the disks as `sda`/`sdb`,
-and that sshd comes up on the forwarded port.
+Installed and booted successfully on VirtualBox: sshd, `/persist`, persistent
+host keys and the `nixos-rebuild` loop are all confirmed working on real
+hardware. Disks are addressed by SATA slot rather than by `/dev/sdX`, after the
+letters were observed swapping between the ISO and the installed system.
 
 Nothing in Phase 1 installs Docker, the devcontainer CLI, or code-server. That
 is Phase 2.
@@ -32,9 +31,22 @@ before step 4. If you forked it, substitute your own owner/repo in the
 | Network | Adapter 1 = NAT |
 | Optical | attach `nixos-minimal-26.05-x86_64-linux.iso` |
 
-The port order matters: the config addresses the disks as `/dev/sda` and
-`/dev/sdb`. VirtualBox assigns a random serial to each `.vdi`, so a
-`/dev/disk/by-id/` path cannot be committed to this repo.
+The port order matters, and it is the *only* thing that identifies the disks.
+The config addresses them by SATA slot:
+
+| SATA port | `by-path` | Disk |
+|---|---|---|
+| 0 | `/dev/disk/by-path/pci-0000:00:1f.2-ata-1` | `system.vdi`, 40 GB |
+| 1 | `/dev/disk/by-path/pci-0000:00:1f.2-ata-2` | `persist.vdi`, 80 GB |
+
+Not `/dev/sda`/`/dev/sdb`: the kernel hands out letters in probe-completion
+order, which is not port order and differs between the ISO and the installed
+system. On this VM, port 1 came up as `sda`. Not `/dev/disk/by-id/` either,
+because that encodes the `.vdi`'s random serial and would change every time
+`system.vdi` is recreated — which is the whole point of the design.
+
+The PCI address is VirtualBox's default PIIX3 SATA controller. If you switch the
+VM to ICH9, it changes, and both disko files need updating.
 
 EFI is off deliberately — VirtualBox's EFI implementation loses its boot entry
 often enough to be a recurring nuisance, and there is no console-free way out of
@@ -86,6 +98,19 @@ window, which has no scrollback and no clipboard.
 
 ## 4. Partition
 
+**Confirm which disk is which, before anything destructive.** The `by-path`
+links are what the config targets, so verify them rather than the letters:
+
+```bash
+lsblk -o NAME,SIZE,TYPE,LABEL,PARTLABEL
+ls -l /dev/disk/by-path/
+```
+
+`...-ata-1` must resolve to the **40 GB** disk and `...-ata-2` to the **80 GB**
+one. If they are the other way round, the `.vdi` files are on the wrong SATA
+ports — fix that in the VirtualBox GUI rather than editing the config, or the
+reinstall path will erase `/persist`.
+
 **First install — this erases both disks:**
 
 ```bash
@@ -117,15 +142,22 @@ which is why it has the extra `mount` above — and getting that wrong is
 expensive: `nixos-install` would then create `/persist/home/dev` on the *system*
 disk, where it is silently shadowed the moment the real disk mounts at boot.
 
+**Do not skip disko and go straight to `nixos-install`.** Without it, `/mnt` is
+an ordinary directory on the ISO's overlay rather than a mounted filesystem.
+`nixos-install` runs most of the way regardless and then dies at the very end
+with `Failed to get blkid info (returned 512) for  on  ` — the blank fields are
+the giveaway that the installer could not find a block device under `/mnt`.
+
 So check before continuing, either way:
 
 ```bash
-lsblk -o NAME,SIZE,LABEL,MOUNTPOINT
-findmnt /mnt/persist
+findmnt /mnt          # must be the 40 GB disk's root partition
+findmnt /mnt/persist  # must be the 80 GB disk, LABEL=persist
+lsblk -o NAME,SIZE,LABEL,PARTLABEL,MOUNTPOINT
 ```
 
-`/mnt` and `/mnt/persist` must both be mounted, and `persist` must be the label
-on `sdb1`.
+Both must be real mounts. `/mnt` should show `disk-system-root` and
+`/mnt/persist` should show `disk-persist-persist`.
 
 ---
 
@@ -230,7 +262,8 @@ echo "survived $(date -Is)" | sudo tee -a /persist/marker
 1. Power off. In the VirtualBox GUI, detach and delete `system.vdi`.
 2. Create a new empty 40 GB `system.vdi` on SATA port 0.
 3. Reattach the ISO, boot it, and repeat steps 2–7 using the **reinstall**
-   command in step 4 (`#dev`, not `#first-install`).
+   command in step 4 (`#dev`, not `#first-install`). Run the `by-path` check
+   first — a recreated `system.vdi` must go back on SATA port 0.
 4. `cat /persist/marker` — both lines should be there, and the host should not
    have complained about a changed SSH fingerprint.
 
@@ -240,7 +273,21 @@ echo "survived $(date -Is)" | sudo tee -a /persist/marker
 
 **Boots to `GRUB rescue>` or "no bootable medium".**
 The ISO is probably still attached, or `system.vdi` is not on SATA port 0.
-Confirm with `lsblk` from the ISO that `/dev/sda` is the 40 GB disk.
+From the ISO, confirm `/dev/disk/by-path/pci-0000:00:1f.2-ata-1` resolves to the
+40 GB disk. GRUB is installed to that path, so if the disks are swapped the boot
+sector lands on `persist.vdi`.
+
+**`Failed to get blkid info (returned 512) for  on  ` at the end of
+`nixos-install`.**
+`/mnt` was not a mounted filesystem — the disko step in step 4 was skipped or
+failed. The blank device and mount point in the message are the tell. Nothing
+was written to disk; run disko, confirm with `findmnt /mnt`, and install again.
+
+**`/persist` mounted, but from a partition that should not exist** (e.g.
+`findmnt /persist` reports `/dev/sda1` when `sda1` is meant to be the 1 MiB BIOS
+partition). Device letters are unstable; this is expected and harmless, since
+every filesystem mounts by `by-partlabel`. It is only a problem if a *config*
+still names a disk by letter — which is the bug this layout exists to avoid.
 
 **Boot hangs waiting for `/persist`.**
 `persist.vdi` is detached or on the wrong port. It is `neededForBoot`, so this

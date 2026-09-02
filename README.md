@@ -19,16 +19,21 @@ and no loss of work.
 
 | Phase | Scope | State |
 |---|---|---|
-| **1** | Bootable machine — flake, disko, users, SSH, `/persist` | **Built. Not yet installed on real hardware.** |
+| **1** | Bootable machine — flake, disko, users, SSH, `/persist` | **Installed and booted.** Wipe test pending |
 | 2 | Docker, `@devcontainers/cli`, the `codespace` launcher | Not started |
 | 3 | home-manager, dotfiles repo, kiosk shortcuts | Not started |
 | 4 | CI-built OVA (`nix build .#vbox`) | Stubbed on purpose |
 
-Phase 1 has been evaluated and built against the pinned nixpkgs in `flake.lock`
-(26.05.20260829, Linux 6.18.48); both disko entry points have been dry-run and
-the lockout assertion tested. What no amount of evaluation can prove is that
-GRUB boots, that VirtualBox presents the disks as `sda`/`sdb`, and that sshd
-answers on the forwarded port. **That is what the next install is for.**
+Phase 1 is **installed and booted on VirtualBox**. Confirmed on real hardware:
+the ISO install, reboot, SSH on the forwarded port, `/persist` on its own disk,
+persistent SSH host keys, and `nixos-rebuild switch` from `/persist/dev-vm`.
+
+Disks are addressed by SATA slot (`/dev/disk/by-path/...`), not by `/dev/sdX`.
+The letters were observed swapping between the ISO kernel and the installed one,
+which pointed both the partitioner and `grub-install` at the wrong disk. See
+[Two disko entry points](#two-disko-entry-points--read-this-before-reinstalling).
+
+Still outstanding: the `/persist`-survives-a-wipe test on the corrected config.
 
 There is no Docker, no devcontainer CLI and no code-server in here yet.
 
@@ -41,7 +46,8 @@ The short version:
 
 1. **VirtualBox GUI** — new VM, two disks (`system.vdi` 40 GB on SATA port 0,
    `persist.vdi` 80 GB on SATA port 1), BIOS firmware (*not* EFI), NAT adapter
-   with the port forwards below, NixOS 26.05 minimal ISO attached.
+   with the port forwards below, NixOS 26.05 minimal ISO attached. The ports are
+   load-bearing: the config identifies each disk by slot, not by name or size.
 2. **Boot the ISO in a GUI window** (headless gives you no console), then
    `passwd` and `sudo systemctl start sshd`.
 3. **From Windows Terminal**, `ssh -p 2222 nixos@localhost`, then partition and
@@ -150,8 +156,8 @@ flake.nix                       nixpkgs 26.05 + disko; both disko entry points
 flake.lock                      pinned — do not float to unstable
 hosts/dev/
   configuration.nix             boot, network, sshd, users, nix settings
-  disko.nix                     system.vdi  (/dev/sda) — disposable
-  disko-persist.nix             persist.vdi (/dev/sdb) — separate file so it
+  disko.nix                     system.vdi  (SATA port 0) — disposable
+  disko-persist.nix             persist.vdi (SATA port 1) — separate file so it
                                 can be left out of a reinstall
 modules/
   persist.nix                   /persist wiring: host keys, home, tmpfiles

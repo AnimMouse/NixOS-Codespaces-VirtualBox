@@ -3,11 +3,11 @@
 # Deliberately in its own file so it can be left out of the reinstall
 # partitioning run. See diskoConfigurations in flake.nix.
 #
-# /dev/sdb == the disk on SATA port 1.
+# ata-2 is SATA port 1. See disko.nix for why this is a by-path and not sdb.
 {
   disko.devices.disk.persist = {
     type = "disk";
-    device = "/dev/sdb";
+    device = "/dev/disk/by-path/pci-0000:00:1f.2-ata-2";
     content = {
       type = "gpt";
       partitions.persist = {
