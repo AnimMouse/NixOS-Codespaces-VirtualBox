@@ -21,7 +21,7 @@ and no loss of work.
 |---|---|---|
 | **1** | Bootable machine — flake, disko, users, SSH, `/persist` | **Done.** Survived a `system.vdi` wipe |
 | **2** | Docker, `@devcontainers/cli`, the `codespace` launcher | **Built and tested.** Not yet run on the VM |
-| 3 | home-manager, dotfiles repo, kiosk shortcuts | Not started |
+| **3** | home-manager, dotfiles repo, kiosk shortcuts | **Built and tested.** Not yet run on the VM |
 | 4 | CI-built OVA (`nix build .#vbox`) | Stubbed on purpose |
 
 Phase 1 is **proven on real hardware**: ISO install, reboot, SSH on the
@@ -34,9 +34,11 @@ which pointed both the partitioner and `grub-install` at the wrong disk. See
 [Two disko entry points](#two-disko-entry-points--read-this-before-reinstalling).
 
 Phase 2 adds Docker, the devcontainer CLI, the hub editor and the `codespace`
-launcher. The launcher was exercised end to end against a real Ubuntu dev
-container — up, rebuild, down, list, logs, port allocation, editor reachable
-through the proxy — but on a Linux host, not yet inside the VM. Applying it is
+launcher; Phase 3 adds home-manager, GitHub auth over SSH, the portable
+container dotfiles and the kiosk launcher. Both were exercised end to end
+against real Ubuntu dev containers — up/rebuild/down/list/logs, port allocation,
+editors served through the proxy, and commit signing verified in all three of
+its environments — but on a Linux host, not yet inside the VM. Applying them is
 one `nixos-rebuild switch`.
 
 There is no Docker, no devcontainer CLI and no code-server in here yet.
@@ -235,6 +237,117 @@ official C/C++ extension. Pick equivalents in `devcontainer.json`
 
 ---
 
+## GitHub authentication
+
+**One SSH key does both jobs.** GitHub keeps authentication keys and signing
+keys in separate lists, but the same public key can be registered as both — so
+there is one credential, it never expires, and it works identically on the VM
+and inside every container.
+
+### Once, on the VM
+
+```bash
+# Either reuse the key you already sign with, or make a new one:
+ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
+
+cat /persist/git/id_ed25519.pub
+```
+
+Add that public key to GitHub **twice** — <https://github.com/settings/keys>:
+
+- once as an **Authentication key** (push and pull)
+- once as a **Signing key** (commit and tag signatures show as Verified)
+
+Then check it:
+
+```bash
+ssh -T git@github.com          # "Hi <you>! You've successfully authenticated"
+sudo systemctl restart git-allowed-signers
+git -C /persist/dev-vm log --show-signature -1
+```
+
+`/persist/git/` is bind-mounted into every dev container by `codespace up`, so
+containers push and sign with the same key. Nothing is copied into a container's
+writable layer.
+
+### Why not a PAT or OAuth
+
+| | Verdict |
+|---|---|
+| **SSH** | Used here. No expiry, and it signs commits as well as authenticating. |
+| **PAT** | Expires, needs rotating, cannot sign, and the easy mistake is pasting it into a remote URL where it sits in plaintext in `.git/config`. |
+| **OAuth (`gh`)** | Installed, but for the **API only** — `gh pr create`, `gh repo create`. Git transport stays on SSH so there is only one credential that can go stale. |
+
+`gh` is authenticated with the device flow, which suits a headless VM — it
+prints a code and you open the URL in Firefox on Windows:
+
+```bash
+gh auth login          # choose SSH; it will offer to upload a key too
+gh auth status
+```
+
+### https remotes still work
+
+The VM's git config rewrites GitHub https URLs to SSH:
+
+```
+[url "git@github.com:"]
+	insteadOf = https://github.com/
+```
+
+That is what lets `codespace up github.com/you/private-repo` clone a private
+repo — the launcher uses the https form and git quietly authenticates with the
+key. The container dotfiles do the same, so pushing a repo cloned over https
+works inside the editor too.
+
+> If your network blocks outbound port 22, add to `~/.ssh/config` on the VM:
+> `Host github.com` / `Hostname ssh.github.com` / `Port 443`.
+
+---
+
+## Dotfiles
+
+Two layers, deliberately separate (`CLAUDE.md` §6).
+
+**VM layer** — `home/dev.nix`, via home-manager: git identity and signing, the
+SSH config, `gh`, bash aliases, tmux, direnv. Applied by `nixos-rebuild switch`.
+
+**Container layer** — a separate repo of plain bash, the same mechanism real
+Codespaces uses, so it stays portable. Point the launcher at it in
+`/persist/codespace/config`:
+
+```bash
+DOTFILES_REPOSITORY=https://github.com/AnimMouse/dotfiles-codespaces
+DOTFILES_INSTALL_COMMAND=install.sh
+```
+
+That repo works out where its signing key is, in this order:
+
+1. `/mnt/git-ssh/id_ed25519` — the mount this VM provides; used in place
+2. `$SSH_ANIMMOZ_KEY` — a GitHub Codespaces secret
+3. neither — signing is switched off so commits still succeed
+
+Environment-dependent settings go to `~/.config/git/local`, which the repo's
+`gitconfig` includes, so nothing writes back through the `~/.gitconfig` symlink
+and dirties the checkout.
+
+---
+
+## Kiosk windows
+
+Firefox has no desktop PWA support, and in a normal tab `Ctrl+W` closes the
+editor with it. `scripts/codespace-kiosk.ps1` runs on the **Windows host** and
+opens a chrome-less window on a dedicated Firefox profile:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1            # hub, 8000
+powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1 8002
+powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1 frp-flyapp
+```
+
+A name is resolved by asking the VM over SSH. The profile is created on first
+use. `F11` leaves kiosk mode, `Alt+F4` closes, and `F1` is the command palette.
+
 ## What lives where
 
 Everything precious is in exactly two places: `/persist`, and GitHub.
@@ -256,7 +369,8 @@ Inside `/persist`:
 /persist/codespace/      per-codespace port, generated devcontainer.json,
                          and the launcher's own config file
 /persist/code-server/    hub editor password, extensions, editor state
-/persist/git/            the SSH key containers push with
+/persist/git/            the SSH key containers push and sign with,
+                         plus the generated allowed_signers
 ```
 
 `/persist` is `neededForBoot`, so it mounts in the initrd before activation. A
@@ -297,7 +411,10 @@ modules/
   docker.nix                    Docker, data-root on /persist, autoprune
   code-server.nix               hub editor + first-boot password generation
   codespace.nix                 launcher package + the editor proxy unit
+  home.nix                      home-manager wiring + allowed_signers unit
+home/dev.nix                    VM-layer dotfiles: git, ssh, gh, bash, tmux
 scripts/codespace               the launcher (built by modules/codespace.nix)
+scripts/codespace-kiosk.ps1     Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md               the full install walkthrough
 .github/workflows/build-ova.yml Phase 4 stub — dispatch-only, no-op
 CLAUDE.md                       design decisions and constraints

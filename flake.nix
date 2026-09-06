@@ -8,10 +8,15 @@
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, disko, ... }:
+    { self, nixpkgs, disko, home-manager, ... }:
     let
       systemDisk = import ./hosts/dev/disko.nix;
       persistDisk = import ./hosts/dev/disko-persist.nix;
@@ -21,6 +26,7 @@
         system = "x86_64-linux";
         modules = [
           disko.nixosModules.disko
+          home-manager.nixosModules.home-manager
 
           # Both disks are declared to the running system, so / and /persist
           # both get declarative fileSystems entries. Which disks are
@@ -34,6 +40,7 @@
           ./modules/docker.nix
           ./modules/code-server.nix
           ./modules/codespace.nix
+          ./modules/home.nix
         ];
       };
 
