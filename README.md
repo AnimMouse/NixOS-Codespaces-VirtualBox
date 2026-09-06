@@ -286,6 +286,35 @@ gh auth login          # choose SSH; it will offer to upload a key too
 gh auth status
 ```
 
+### Where the gh token lives, and how containers get it
+
+**On the VM it persists, and better than Codespaces does.** `gh` stores its
+credentials under `~/.config/gh/`, and `~` is `/persist/home/dev` — so the login
+survives a reboot *and* a full `system.vdi` wipe. You authenticate once, not
+once per machine rebuild. (`gh` prefers a system credential store and falls back
+to a plain file when there is no secret-service daemon, which on a headless VM
+is always; `gh auth status` prints the location it chose.)
+
+**Containers are a different `$HOME`, so they do not inherit it.** Real
+Codespaces papers over this by injecting `GITHUB_TOKEN` into the container
+environment. `codespace up` does the same thing: it reads `gh auth token` on the
+VM and hands the container `GH_TOKEN`, which takes precedence over any stored
+credential.
+
+The token is written to `~/.codespace-token` inside the container, mode `0600`
+and owned by the remote user — not into `/etc/profile.d`, which has to stay
+world-readable for login shells to source it. It is also set on the code-server
+process, so the editor's own terminals inherit it directly.
+
+It is read **at `up` time**, so after `gh auth login` or a token change, run
+`codespace up <name>` again to refresh it. To keep the token on the VM instead,
+put `CONTAINER_GH_TOKEN=0` in `/persist/codespace/config`.
+
+> `gh` itself is not in most base images. Add the official feature to the
+> project's `devcontainer.json` (or to the generated one) —
+> `ghcr.io/devcontainers/features/github-cli:1`. The token is exported either
+> way, so `git` over https and anything else reading `GH_TOKEN` works without it.
+
 ### https remotes still work
 
 The VM's git config rewrites GitHub https URLs to SSH:
@@ -368,6 +397,7 @@ Inside `/persist`:
 /persist/docker/         Docker's data-root: images, volumes, containers
 /persist/codespace/      per-codespace port, generated devcontainer.json,
                          and the launcher's own config file
+/persist/home/dev/.config/gh/   the gh login, surviving a system.vdi wipe
 /persist/code-server/    hub editor password, extensions, editor state
 /persist/git/            the SSH key containers push and sign with,
                          plus the generated allowed_signers

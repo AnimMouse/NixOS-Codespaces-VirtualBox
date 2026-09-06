@@ -229,6 +229,36 @@ cmd_up() {
     'command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo sh -s -- --method standalone --prefix /usr/local' \
     || die "could not install code-server in the container"
 
+  # Real Codespaces injects GITHUB_TOKEN so `gh` works inside the container
+  # without a second login. Nothing does that here, so hand the container the
+  # VM's own gh token. Read at `up` time — after `gh auth login` or a token
+  # change, `codespace up` again to refresh it. Set CONTAINER_GH_TOKEN=0 in
+  # /persist/codespace/config to keep the token on the VM instead.
+  local gh_token=""
+  if [ "${CONTAINER_GH_TOKEN:-1}" != 0 ]; then
+    gh_token=$(gh auth token 2>/dev/null || true)
+  fi
+
+  local remote_home
+  remote_home=$(docker exec -u "$remote_user" "$cid" sh -c 'echo $HOME' 2>/dev/null | tr -d '\r')
+  [ -n "$remote_home" ] || remote_home="/home/$remote_user"
+
+  # The token goes in a 0600 file of its own rather than into /etc/profile.d,
+  # which has to stay world-readable for login shells to source it.
+  local tokenfile="$remote_home/.codespace-token"
+  if [ -n "$gh_token" ]; then
+    local tmptok
+    tmptok=$(mktemp)
+    printf 'export GH_TOKEN=%s\n' "$gh_token" > "$tmptok"
+    docker cp "$tmptok" "$cid:$tokenfile" >/dev/null
+    docker exec -u root "$cid" chown "$remote_user" "$tokenfile"
+    docker exec -u root "$cid" chmod 0600 "$tokenfile"
+    rm -f "$tmptok"
+  else
+    # Do not leave a token behind from a previous up.
+    docker exec -u root "$cid" rm -f "$tokenfile" 2>/dev/null || true
+  fi
+
   # Login shells get the git env too; the editor's own terminals inherit it
   # from the code-server process below.
   local envfile
@@ -239,6 +269,10 @@ cmd_up() {
       agent)   echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock' ;;
       keyfile) echo 'export GIT_SSH_COMMAND="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"' ;;
     esac
+    # Deliberately unexpanded: $HOME has to resolve inside the container at
+    # login, not out here.
+    # shellcheck disable=SC2016
+    echo '[ -r "$HOME/.codespace-token" ] && . "$HOME/.codespace-token"'
   } > "$envfile"
   docker cp "$envfile" "$cid:/etc/profile.d/codespace.sh" >/dev/null
   docker exec -u root "$cid" chmod 0644 /etc/profile.d/codespace.sh
@@ -263,6 +297,7 @@ cmd_up() {
     note "starting editor on $remote_ws"
     docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
     local -a envargs=(-e "PASSWORD=$(editor_password)")
+    [ -n "$gh_token" ] && envargs+=(-e "GH_TOKEN=$gh_token")
     case "$git_ssh" in
       agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock) ;;
       keyfile) envargs+=(-e "GIT_SSH_COMMAND=ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes") ;;
@@ -292,6 +327,7 @@ cmd_up() {
   echo "  password: $(editor_password)"
   [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
+  [ -n "$gh_token" ] && echo "  gh:  authenticated with the VM's token"
   [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
   echo
   echo "  F1 opens the command palette. Ctrl+Shift+P is a Firefox private window."
