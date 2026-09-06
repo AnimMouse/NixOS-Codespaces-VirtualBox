@@ -115,7 +115,7 @@ editor_password() {
 
 cmd_up() {
   [ $# -ge 1 ] || usage
-  local name ws port cid remote_user resolved recreate="${2:-}"
+  local name ws port cid remote_user remote_ws up_json resolved recreate="${2:-}"
   # Not inlined into the read: a die() inside a command substitution cannot
   # stop the caller, so the status has to be checked here.
   resolved=$(resolve_workspace "$1") || exit 1
@@ -172,10 +172,18 @@ cmd_up() {
   fi
 
   note "starting dev container '$name' from $ws"
-  devcontainer "${args[@]}" || die "devcontainer up failed"
+  # Progress and build logs go to stderr, so capturing stdout still shows them.
+  up_json=$(devcontainer "${args[@]}") || die "devcontainer up failed"
+  up_json=$(printf '%s\n' "$up_json" | tail -1)
 
-  cid=$(container_of "$name")
-  [ -n "$cid" ] || die "container did not come up"
+  # Ask the CLI where things landed rather than guessing. remoteWorkspaceFolder
+  # honours a workspaceFolder override in devcontainer.json, which assuming
+  # /workspaces/<basename> would get wrong.
+  cid=$(printf '%s' "$up_json" | jq -r '.containerId // empty')
+  remote_user=$(printf '%s' "$up_json" | jq -r '.remoteUser // "root"')
+  remote_ws=$(printf '%s' "$up_json" | jq -r '.remoteWorkspaceFolder // empty')
+  [ -n "$cid" ] || die "devcontainer up reported no container: $up_json"
+  [ -n "$remote_ws" ] || die "devcontainer up reported no workspace folder: $up_json"
 
   # What the container actually has, not what the host happened to offer. `up`
   # reuses an existing container and silently ignores changed --mount flags, so
@@ -191,10 +199,6 @@ cmd_up() {
     note "note: this container was created with git credentials '$git_ssh:-none';"
     note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
   fi
-
-  remote_user=$(devcontainer exec --workspace-folder "$ws" --id-label "codespace=$name" \
-    sh -c 'id -un' 2>/dev/null | tr -d '\r' | tail -1)
-  [ -n "$remote_user" ] || remote_user=root
 
   # Installed after every `up`, not baked in as a feature: no third-party
   # feature for code-server resolves on ghcr, and doing it here leaves the
@@ -221,17 +225,34 @@ cmd_up() {
   docker exec -u root "$cid" chmod 0644 /etc/profile.d/codespace.sh
   rm -f "$envfile"
 
-  if ! docker exec "$cid" pgrep -f "code-server.*--bind-addr" >/dev/null 2>&1; then
-    note "starting editor"
+  # code-server has to be told which folder to open. Without it the editor comes
+  # up with no workspace at all: the code is mounted and the container is fine,
+  # but the file tree is empty and terminals start in $HOME.
+  #
+  # The arguments are recorded next to the log so that an editor started by an
+  # older version of this script — or with a different folder — is replaced
+  # rather than left running.
+  #
+  # '[c]ode-server' rather than 'code-server': the pattern is being matched
+  # against full command lines, and the sh running pgrep has the pattern in its
+  # own, so an unbracketed pattern always matches itself.
+  local want="0.0.0.0:$EDITOR_PORT $remote_ws"
+  if ! docker exec "$cid" sh -c \
+       "[ \"\$(cat /tmp/code-server.args 2>/dev/null)\" = \"$want\" ] \
+        && pgrep -f '[c]ode-server.*--bind-addr' >/dev/null" 2>/dev/null
+  then
+    note "starting editor on $remote_ws"
+    docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
     local -a envargs=(-e "PASSWORD=$(editor_password)")
     case "$git_ssh" in
       agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock) ;;
       keyfile) envargs+=(-e "GIT_SSH_COMMAND=ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes") ;;
     esac
     docker exec -d -u "$remote_user" "${envargs[@]}" "$cid" bash -lc \
-      "exec code-server --bind-addr 0.0.0.0:$EDITOR_PORT --auth password \
+      "printf '%s' \"$want\" > /tmp/code-server.args
+       exec code-server --bind-addr 0.0.0.0:$EDITOR_PORT --auth password \
          --disable-telemetry --disable-update-check \
-         >/tmp/code-server.log 2>&1"
+         \"$remote_ws\" >/tmp/code-server.log 2>&1"
   fi
 
   # The CLI has no way to publish a port on a container it creates, so the
