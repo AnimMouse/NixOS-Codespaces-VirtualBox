@@ -127,12 +127,37 @@ cmd_up() {
   echo "$port" > "$STATE/$name/port"
   echo "$ws" > "$STATE/$name/workspace"
 
+  # Read before anything that might consult DEFAULT_IMAGE or DOTFILES_*.
+  if [ -r "$STATE/config" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE/config"
+  fi
+
   local -a args=(
     up
     --workspace-folder "$ws"
     --id-label "codespace=$name"
   )
   [ "$recreate" = recreate ] && args+=(--remove-existing-container)
+
+  # Most repos have no devcontainer.json, and the CLI refuses to guess one.
+  # --override-config is its documented answer ("required when there is no
+  # devcontainer.json otherwise"). The generated config lives in the codespace's
+  # state directory rather than in the repo: nothing is added to a checkout you
+  # may not own, and the file is yours to edit — add features, change the image,
+  # then `codespace rebuild`.
+  #
+  # It is only used while the repo has no config of its own. Commit a real
+  # .devcontainer/devcontainer.json and it takes over on the next rebuild.
+  if [ ! -f "$ws/.devcontainer/devcontainer.json" ] && [ ! -f "$ws/.devcontainer.json" ]; then
+    local override="$STATE/$name/devcontainer.json"
+    if [ ! -f "$override" ]; then
+      note "no devcontainer.json in the repo — writing a default to $override"
+      printf '{\n  "name": "%s",\n  "image": "%s"\n}\n' \
+        "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu}" > "$override"
+    fi
+    args+=(--override-config "$override")
+  fi
 
   # Git credentials inside the container (CLAUDE.md §8).
   #
@@ -160,12 +185,6 @@ cmd_up() {
     git_want="agent"
   fi
 
-  # Dotfiles: a plain-bash repo targeting Debian userland, the same mechanism
-  # real Codespaces uses (CLAUDE.md §6). Optional.
-  if [ -r "$STATE/config" ]; then
-    # shellcheck source=/dev/null
-    . "$STATE/config"
-  fi
   if [ -n "${DOTFILES_REPOSITORY:-}" ]; then
     args+=(--dotfiles-repository "$DOTFILES_REPOSITORY")
     [ -n "${DOTFILES_INSTALL_COMMAND:-}" ] && args+=(--dotfiles-install-command "$DOTFILES_INSTALL_COMMAND")

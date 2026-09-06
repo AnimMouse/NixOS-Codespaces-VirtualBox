@@ -133,6 +133,33 @@ Each codespace keeps a **sticky port** in the 8001-8010 range, recorded under
 the printed `http://localhost:<port>/` in Firefox; the password is shared with
 the hub editor and is printed by `up`.
 
+### Repos without a devcontainer.json
+
+Most repos do not have one, and the CLI refuses to guess — it fails with
+`Dev container config not found`. So the launcher writes a default to the
+codespace's state directory and passes it as `--override-config`, which is the
+CLI's documented route for exactly this:
+
+```
+/persist/codespace/<name>/devcontainer.json
+```
+
+Nothing is added to the checkout. That file is yours to edit — change the image,
+add features — then `codespace rebuild <name>`. To change the default for new
+codespaces, set it in `/persist/codespace/config`:
+
+```bash
+DEFAULT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+```
+
+The default is `mcr.microsoft.com/devcontainers/base:ubuntu`, not the
+`universal` image real Codespaces falls back to: universal is tens of
+gigabytes, which is the wrong trade in a VM being kept lean.
+
+The generated config is used **only while the repo has none of its own**. Commit
+a real `.devcontainer/devcontainer.json` and it takes over on the next
+`codespace rebuild`; delete it and the generated one comes back.
+
 ### The hub editor
 
 `http://localhost:8000/` is code-server running on the VM itself, for managing
@@ -174,7 +201,7 @@ existing container and silently ignores changed `--mount` flags.
 
 ### Dotfiles
 
-Optional, and deliberately not Nix (`CLAUDE.md` §6). Create
+Optional, and deliberately not Nix (`CLAUDE.md` §6). Add to
 `/persist/codespace/config`:
 
 ```bash
@@ -199,6 +226,8 @@ Codespaces uses, so the repo stays portable. Target Debian/Ubuntu userland.
   container discards it, hence the reinstall.
 - **Stopping.** The CLI has `up`, `exec` and `build` but no `down`, so
   `codespace down` stops the container directly and stops the proxy unit.
+- **Working without a devcontainer.json**, via a generated `--override-config`
+  kept outside the repo. See above.
 
 Extensions come from **Open VSX**, not Microsoft's marketplace: no Pylance, no
 official C/C++ extension. Pick equivalents in `devcontainer.json`
@@ -224,7 +253,8 @@ Inside `/persist`:
 /persist/secrets/        secrets, mode 0700
 /persist/dev-vm/         this repo, for the rebuild loop
 /persist/docker/         Docker's data-root: images, volumes, containers
-/persist/codespace/      per-codespace port allocation + launcher config
+/persist/codespace/      per-codespace port, generated devcontainer.json,
+                         and the launcher's own config file
 /persist/code-server/    hub editor password, extensions, editor state
 /persist/git/            the SSH key containers push with
 ```
