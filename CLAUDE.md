@@ -107,28 +107,37 @@ ssh -p 2222 dev@localhost 'sudo nixos-rebuild switch --flake /persist/dev-vm#dev
 
 ---
 
-## 5. Repository layout to build
+## 5. Repository layout
+
+As built. Differences from the original sketch are noted.
 
 ```
-dev-vm/
-├── flake.nix                  # nixpkgs 26.05 + disko
-├── flake.lock
-├── hosts/dev/
-│   ├── configuration.nix      # top-level machine config
-│   └── disko.nix              # declarative partitioning, both disks
-├── modules/
-│   ├── persist.nix            # /persist bind-mounts, host key persistence
-│   ├── docker.nix             # Docker + devcontainer CLI
-│   └── code-server.nix        # hub editor + first-boot password generation
-├── home/
-│   └── dev.nix                # home-manager: VM-layer dotfiles
-├── scripts/
-│   └── codespace              # launcher: up / down / list
-├── docs/
-│   └── BOOTSTRAP.md           # the §7 sequence, for humans
-└── .github/workflows/
-    └── build-ova.yml          # PHASE 2 ONLY — leave stubbed
+flake.nix                      # nixpkgs 26.05 + disko + home-manager
+flake.lock
+hosts/dev/
+├── configuration.nix          # top-level machine config
+├── disko.nix                  # system.vdi  — SATA port 0
+└── disko-persist.nix          # persist.vdi — SATA port 1, SEPARATE on purpose
+modules/
+├── persist.nix                # /persist wiring, host key persistence
+├── docker.nix                 # Docker + devcontainer CLI
+├── code-server.nix            # hub editor + first-boot password generation
+├── codespace.nix              # launcher package + editor proxy unit
+└── home.nix                   # home-manager wiring + git identity units
+home/dev.nix                   # home-manager: VM-layer dotfiles
+scripts/
+├── codespace                  # launcher: up / rebuild / down / rm / list / logs
+└── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
+docs/BOOTSTRAP.md              # the §7 sequence, for humans
+.github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
 ```
+
+Two files the sketch did not have, both earning their place:
+
+- **`disko-persist.nix`** is separate so the persist disk can be left out of a
+  reinstall. See §7.
+- **`modules/codespace.nix`** separates the launcher layer from the container
+  runtime in `docker.nix`.
 
 ---
 
@@ -170,14 +179,26 @@ Steps 1–2 are manual GUI work by the user. The repo must support 3 onward.
    sudo systemctl start sshd   # enabled in config but NOT started at boot
    ```
 4. From Windows Terminal: `ssh -p 2222 nixos@localhost`
-5. Install:
+5. Install. **Two entry points, because `disko --mode destroy,format,mount` is
+   unconditional and a single target covering both disks would erase `/persist`
+   on every reinstall — contradicting §3.**
    ```bash
+   # first install only — erases BOTH disks
    sudo nix --experimental-features "nix-command flakes" run \
      github:nix-community/disko -- --mode destroy,format,mount \
-     --flake github:USER/dev-vm#dev
+     --flake github:USER/dev-vm#first-install
+
+   # reinstall onto a fresh system.vdi — erases the system disk only
+   #   ...#dev, then: sudo mount /dev/disk/by-label/persist /mnt/persist
+
    sudo nixos-install --flake github:USER/dev-vm#dev
    ```
    Prompts for a root password at the end. Do not skip it.
+
+   Do not skip the disko step. Without it `/mnt` is a directory on the ISO
+   overlay, `nixos-install` runs to completion anyway, and dies at the very end
+   with `Failed to get blkid info (returned 512) for  on  ` — the blank fields
+   being the only clue.
 6. **Eject the ISO**, then reboot
 7. `ssh-keygen -R "[localhost]:2222"` on the host, then SSH back in
 8. `codespace up github.com/USER/project`
@@ -195,31 +216,73 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 |---|---|
 | **Lockout.** A user with `isNormalUser` but no `hashedPassword`/`hashedPasswordFile`/`authorizedKeys` produces an unloggable machine after reboot | Config must declare auth. Add an assertion if practical |
 | **known_hosts collision.** ISO and installed system share `localhost:2222` with different keys | Persist host keys to `/persist/ssh/`. Then it happens once, ever |
-| **Git credentials.** Codespaces injects a token; nothing does that locally, so `git push` fails inside containers | Mount `/persist/ssh` read-only into containers via `devcontainer.json` `mounts` |
+| **Git credentials.** Codespaces injects a token; nothing does that locally, so `git push` fails inside containers | Mount `/persist/git` (the git key only) into containers from the launcher, and inject `GH_TOKEN` from the VM's `gh`. Not `/persist/ssh`, and not read-only — see below |
 | **Secrets in a public repo.** Password hashes must not be committed | Generate a random code-server password on first boot if `/persist/code-server/pw` is absent; log it to the journal |
 | **No `devcontainer down`.** The CLI has `up`, `exec`, `build` — no down/stop | The `codespace` wrapper implements `down` via `docker stop` |
-| **Docker image sprawl** | `virtualisation.docker.autoPrune.enable = true`, and `/var/lib/docker` bind-mounted to `/persist/docker` |
+| **Docker image sprawl** | `virtualisation.docker.autoPrune.enable = true`, and Docker's `data-root` set to `/persist/docker` (a bind mount would need its source to exist before systemd mounts it) |
 | **Firefox keybinds.** `Ctrl+Shift+P` opens a Private Window, not the command palette. `Ctrl+W` closes the tab and the editor with it. Firefox has no desktop PWA support | Document `F1` for the palette. Ship a kiosk launcher: `firefox --kiosk -P codespace http://localhost:PORT` |
 | **Marketplace.** code-server uses Open VSX, not Microsoft's. No Pylance, no official C/C++ extension | Pick Open VSX equivalents in `devcontainer.json` `customizations` |
 | **Turtle icon** in the VirtualBox status bar means Hyper-V leaked back and VirtualBox fell back to the Windows Hypervisor Platform API | Flag loudly to the user; performance drops 2–5× |
+
+### Found while building 1–3 — all encoded as fixes
+
+| Gotcha | Handling |
+|---|---|
+| **`/dev/sdX` is not stable.** Letters follow probe order, not SATA port, and differ between the ISO and the installed system | Address disks by `by-path`. Never by letter, never by `by-id` |
+| **`disko --mode destroy,format,mount` is unconditional** — one target covering both disks erases `/persist` on every reinstall | Two `diskoConfigurations`: `#dev` (system only) and `#first-install` (both) |
+| **Skipping disko still "works".** `nixos-install` runs to completion on an unmounted `/mnt` and dies on the bootloader with blank fields in the error | Pre-flight `findmnt /mnt` in BOOTSTRAP; troubleshooting entry for the exact message |
+| **`devcontainer up` has no `--publish`** and `appPort` only exists in the project's own config | `codespace-proxy@<name>` systemd unit running `socat` to the container's bridge address, re-resolved at start |
+| **No third-party code-server feature resolves on ghcr** (`devcontainers-extra`, `-contrib`, `-community`, `itsmechlark` all return no manifest) | Install it after every `up` with the official script, `--method standalone`. Only `devcontainers/*` features are dependable |
+| **`code-server` with no path argument** opens no folder: empty tree, terminals in `$HOME` | Pass `remoteWorkspaceFolder` from `devcontainer up`'s stdout JSON |
+| **The CLI refuses to guess a `devcontainer.json`** and most repos have none | Generate one into `/persist/codespace/<name>/` and pass `--override-config`. Never write into the checkout |
+| **`--mount` rejects `readonly`** — it is validated as `type/source/target/external` only | Mount a directory holding only the git key, not `~/.ssh` and not the host keys |
+| **`--remote-env` and `--secrets-file` do not persist.** They apply to that invocation's user commands, not to the container environment | Put anything long-lived on the code-server process and in `/etc/profile.d`; secrets in a `0600` file sourced from there |
+| **The dotfiles clone runs inside the container, first**, before any credential this repo sets up exists — a private repo fails and `up` still reports success | Pass `GIT_SSH_COMMAND` and an https→ssh rewrite via `--remote-env`, which *does* reach that clone |
+| **nixpkgs bash has no `compgen`** — built without programmable completion, so it returns 127 and the branch silently reads false. shellcheck does not catch it | Glob into an array and test `[ -e "${arr[0]}" ]` |
+| **`pgrep -f` inside `sh -c` matches itself**, because the pattern is in the shell's own command line | Bracket the first character: `[c]ode-server` |
+| **`docker system prune` deletes stopped containers**, and `codespace down` stops rather than removes | `autoPrune.flags = [ "--filter" "until=168h" ]` |
 
 ---
 
 ## 9. Build order
 
-**Phase 1 — bootable machine.** `flake.nix`, `disko.nix`, `configuration.nix`
-with users/SSH/persist. Verify: installs from ISO, reboots, accepts SSH, `/persist`
-survives a `system.vdi` wipe.
+**Phase 1 — bootable machine. DONE, proven on hardware.** `flake.nix`,
+`disko.nix`, `configuration.nix` with users/SSH/persist. Installs from the ISO,
+reboots, accepts SSH, and `/persist` survived a full `system.vdi` delete and
+reinstall with the marker file intact and no host-key change.
 
-**Phase 2 — container plumbing.** Docker, devcontainer CLI, the `codespace`
-launcher, port allocation. Verify: an Ubuntu-based `devcontainer.json` comes up
-and its editor is reachable in Firefox.
+**Phase 2 — container plumbing. DONE, running on the VM.** Docker, devcontainer
+CLI, the `codespace` launcher, port allocation, hub editor. A dev container comes
+up and its editor is reachable in Firefox, for repos with and without a
+`devcontainer.json`.
 
-**Phase 3 — personalisation.** home-manager, the dotfiles repo, kiosk shortcuts.
+**Phase 3 — personalisation. DONE.** home-manager (`home/dev.nix`), GitHub auth
+and commit signing over SSH, the portable container dotfiles repo, and the
+Windows kiosk launcher.
 
-**Phase 4 — optional.** GitHub Actions building an OVA via `nix build .#vbox` so
-recreates drop from ~30 minutes to ~2. Do this only after Phase 1 is proven; a
-CI-built image from an unproven config is worse than no image.
+**Phase 4 — optional, not started.** GitHub Actions building an OVA via
+`nix build .#vbox` so recreates drop from ~30 minutes to ~2. Phase 1 is now
+proven, so the precondition is met.
+
+### Decisions taken during 1–3 that amend the sections above
+
+- **Disks are addressed by SATA slot** (`/dev/disk/by-path/pci-0000:00:1f.2-ata-N`),
+  never `/dev/sdX`. The kernel assigned letters in probe order, not port order,
+  and differently on the ISO than on the installed system — which pointed both
+  the partitioner and `grub-install` at the wrong disk. Not `by-id` either: that
+  encodes the `.vdi`'s serial, which changes every time `system.vdi` is recreated.
+- **BIOS/GRUB, not UEFI.** VirtualBox's EFI loses its boot entry too often, and
+  a headless VM gives no way out of the EFI shell.
+- **Two disko entry points** (§7).
+- **Docker uses `data-root`, not a bind mount** of `/var/lib/docker`. A bind
+  mount needs its source to exist before systemd mounts it; `dockerd` creates
+  `data-root` itself.
+- **Containers get `/persist/git`, not `/persist/ssh`,** and not read-only. The
+  CLI validates `--mount` as `type/source/target/external` and rejects
+  `readonly`; `/persist/ssh` holds root-owned host keys that containers cannot
+  read and should not have.
+- **One SSH key does authentication and signing.** No PAT. `gh` is installed for
+  the API only.
 
 ---
 

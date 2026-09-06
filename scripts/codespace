@@ -25,7 +25,8 @@ usage() {
 usage:
   codespace up <url|path|name>   create/start a dev container and its editor
   codespace rebuild <name|path>  recreate it from scratch, keeping the port
-  codespace down <name>          stop it
+  codespace down <name>          stop it, keeping the container
+  codespace rm <name> [--repo]   delete the container; --repo drops the checkout
   codespace list                 what exists, on which port
   codespace logs <name>          editor log, for when the URL does not answer
 USAGE
@@ -365,6 +366,34 @@ cmd_down() {
   fi
 }
 
+cmd_rm() {
+  [ $# -ge 1 ] || usage
+  local name cid keep_repo=1
+  name=$(slugify "$1")
+  [ "${2:-}" = "--repo" ] && keep_repo=0
+
+  sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
+
+  cid=$(container_any "$name")
+  if [ -n "$cid" ]; then
+    note "removing container for $name"
+    docker rm -f "$cid" >/dev/null
+  fi
+
+  # Drops the port reservation and any generated devcontainer.json, so the next
+  # `up` starts clean. The checkout is left alone unless asked: it is the one
+  # thing here that might hold work that is not pushed yet.
+  rm -rf "${STATE:?}/$name"
+
+  if [ "$keep_repo" = 0 ]; then
+    note "removing $REPOS/$name"
+    rm -rf "${REPOS:?}/$name"
+  elif [ -d "$REPOS/$name" ]; then
+    echo "  the checkout is still at $REPOS/$name"
+    echo "  'codespace rm $name --repo' deletes that too"
+  fi
+}
+
 cmd_list() {
   local dir name port cid status
   printf '%-24s %-6s %-10s %s\n' NAME PORT STATE URL
@@ -398,8 +427,9 @@ case "$sub" in
          [ $# -ge 1 ] || usage
          cmd_up "$1" recreate ;;
   down)  cmd_down "$@" ;;
+  rm|delete) cmd_rm "$@" ;;
   list|ls) cmd_list "$@" ;;
   logs)  cmd_logs "$@" ;;
   -h|--help|help) usage 0 ;;
-  *)     die "unknown command '$sub' (try: up, down, list, logs)" ;;
+  *)     die "unknown command '$sub' (try: up, rebuild, down, rm, list, logs)" ;;
 esac
