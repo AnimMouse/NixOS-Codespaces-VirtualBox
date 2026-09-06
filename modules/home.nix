@@ -31,6 +31,40 @@ in
     users.dev = import ../home/dev.nix;
   };
 
+  # GitHub's host keys, scanned once on the VM and shared with every container
+  # through the /persist/git mount. Without this a container cloning over SSH
+  # has nothing to verify github.com against, and the clone either prompts (and
+  # fails, being non-interactive) or has to trust blindly every single time.
+  #
+  # Best-effort: no network at boot must not fail the unit, and containers still
+  # carry StrictHostKeyChecking=accept-new as a fallback.
+  systemd.services.github-known-hosts = {
+    description = "Record GitHub's SSH host keys for containers to verify against";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    unitConfig.RequiresMountsFor = "/persist/git";
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    path = with pkgs; [ openssh coreutils ];
+    script = ''
+      out=/persist/git/known_hosts
+      [ -s "$out" ] && exit 0
+
+      if ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "$out".tmp 2>/dev/null          && [ -s "$out".tmp ]; then
+        mv "$out".tmp "$out"
+        chown dev:users "$out"
+        chmod 0644 "$out"
+      else
+        rm -f "$out".tmp
+        echo "could not reach github.com to scan host keys; containers will"
+        echo "fall back to accept-new on first connection"
+      fi
+    '';
+  };
+
   # allowed_signers is derived from the key rather than appended to. The
   # Codespaces dotfiles used `>>` on every login, which grows the file without
   # bound and fills it with duplicates; rewriting it from the key each boot

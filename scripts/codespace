@@ -175,14 +175,32 @@ cmd_up() {
   # programmable completion, so compgen does not exist and the test silently
   # takes the wrong branch. With nullglob unset, a pattern that matches nothing
   # survives literally and fails -e.
-  local git_want=""
+  local git_want="" ssh_cmd=""
   local -a git_keys=(/persist/git/id_*)
   if [ -e "${git_keys[0]}" ]; then
     args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
     git_want="keyfile"
+    ssh_cmd="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"
   elif [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
     args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=/tmp/ssh-agent.sock")
     git_want="agent"
+    ssh_cmd="ssh -o IdentityAgent=/tmp/ssh-agent.sock"
+  fi
+
+  # The dotfiles clone runs *inside* the container, before anything this script
+  # writes there exists — so a private dotfiles repo over https fails with
+  # "could not read Username", and `up` still reports success, leaving the
+  # dotfiles silently unapplied.
+  #
+  # --remote-env does reach that clone, so hand it the mounted key and rewrite
+  # github https URLs to SSH. This makes DOTFILES_REPOSITORY work as either an
+  # https or an ssh URL, private or not.
+  if [ -n "$ssh_cmd" ]; then
+    ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/mnt/git-ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+    args+=(--remote-env "GIT_SSH_COMMAND=$ssh_cmd")
+    args+=(--remote-env "GIT_CONFIG_COUNT=1")
+    args+=(--remote-env "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf")
+    args+=(--remote-env "GIT_CONFIG_VALUE_0=https://github.com/")
   fi
 
   if [ -n "${DOTFILES_REPOSITORY:-}" ]; then

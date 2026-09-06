@@ -350,6 +350,34 @@ DOTFILES_REPOSITORY=https://github.com/AnimMouse/dotfiles-codespaces
 DOTFILES_INSTALL_COMMAND=install.sh
 ```
 
+### A private dotfiles repo
+
+Worth knowing, because the failure is silent: **the dotfiles clone runs inside
+the container**, before anything the launcher writes there exists. So none of
+the VM's git config, SSH key or `gh` token applies to it by default. Cloning a
+private repo over https fails with
+
+```
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+and `devcontainer up` **still reports success**, so the container comes up fine
+with none of your dotfiles applied.
+
+`codespace up` fixes this by handing that clone the mounted key: it passes
+`GIT_SSH_COMMAND` pointing at `/mnt/git-ssh/id_ed25519` and rewrites
+`https://github.com/` to `git@github.com:`. So `DOTFILES_REPOSITORY` works as
+either an https or an ssh URL, public or private, as long as
+`/persist/git/id_ed25519` exists and is registered on GitHub.
+
+github.com's host keys are scanned once on the VM into `/persist/git/known_hosts`
+and shared with every container through the same mount, so containers verify
+rather than trusting blindly. If the scan could not run, containers fall back to
+`StrictHostKeyChecking=accept-new`.
+
+> Simpler alternative: dotfiles usually contain nothing secret, and a public
+> repo sidesteps all of this.
+
 That repo works out where its signing key is, in this order:
 
 1. `/mnt/git-ssh/id_ed25519` — the mount this VM provides; used in place
