@@ -432,6 +432,7 @@ install script runs after every `up`), and stopping a container at all.
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
+| `codespace up` hangs at `Executing command ./install.sh...` | Something in the dotfiles install is waiting for input. The usual culprit is `ssh-keygen` on a passphrase-protected key: the tooling gives install.sh a tty, so it prompts and waits forever, and the prompt is usually swallowed. Ctrl-C, then `codespace rebuild <name>`. Keep every `ssh-keygen` in a dotfiles repo non-interactive with `-P ""` |
 | `git@github.com: Permission denied (publickey)` inside a container | Either the key is passphrase-locked with no agent holding it — `ssh-add /persist/git/id_ed25519`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |

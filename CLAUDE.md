@@ -241,6 +241,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **nixpkgs bash has no `compgen`** — built without programmable completion, so it returns 127 and the branch silently reads false. shellcheck does not catch it | Glob into an array and test `[ -e "${arr[0]}" ]` |
 | **`pgrep -f` inside `sh -c` matches itself**, because the pattern is in the shell's own command line | Bracket the first character: `[c]ode-server` |
 | **`docker system prune` deletes stopped containers**, and `codespace down` stops rather than removes | `autoPrune.flags = [ "--filter" "until=168h" ]` |
+| **Anything in `install.sh` that waits for input hangs the container create forever.** The tooling runs it with a tty, so `ssh-keygen` on an encrypted key prompts — and with stderr discarded the prompt is invisible. It looks like `codespace up` stopping dead at "Executing command ./install.sh..." | Force every `ssh-keygen` non-interactive: `-P ""`, `SSH_ASKPASS_REQUIRE=never`, stdin closed. Never configure signing with a key that cannot be used without a prompt |
 | **A passphrase-protected key cannot be used where nothing can prompt** — and ssh reports it as `Permission denied (publickey)`, identical to an unregistered key | A user ssh-agent (`services.ssh-agent` + `users.users.dev.linger`) at the stable `/run/user/1000/ssh-agent`; the launcher forwards the socket, never the key. It detects a locked key with `ssh-keygen -y -P ""` and names the `ssh-add` to run rather than letting git fail opaquely |
 
 ---
