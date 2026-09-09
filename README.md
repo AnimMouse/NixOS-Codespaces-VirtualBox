@@ -123,6 +123,7 @@ That is the whole setup. `codespace up <repo>` from here.
 
 ```bash
 codespace up github.com/you/project   # clone, build, start the editor
+codespace new scratch                 # no repo — just an empty workspace
 codespace list                        # what exists, on which port
 codespace down project                # stop it; container kept
 codespace up project                  # start it again, same port
@@ -140,6 +141,7 @@ the password is shared with the hub editor and printed by `up`.
 | Command | What it does |
 |---|---|
 | `codespace up <url\|path\|name>` | Create or start it, and its editor |
+| `codespace new <name>` | The same, on an empty workspace — no repo to clone |
 | `codespace rebuild <name>` | Recreate the container from scratch, same port |
 | `codespace down <name>` | Stop it. Fast to restart, keeps installed packages |
 | `codespace rm <name>` | Delete the container and its port. **Keeps the checkout** |
@@ -149,6 +151,12 @@ the password is shared with the hub editor and printed by `up`.
 
 `down` versus `rm`: `down` is closing the lid, `rm` is throwing the machine
 away. Both leave your code alone.
+
+**A blank codespace** — for scratch work, trying a language, or anything with no
+repo yet — is `codespace new <name>`. It creates an empty `/persist/repos/<name>`
+and brings a container up on it, using the default image. Deliberately no
+`git init`: run one yourself if you want the directory to become a repo. Running
+it again on an existing name just starts that codespace, so it is safe to repeat.
 
 Use `rebuild` after changing a `devcontainer.json`, or after adding an SSH key
 that a running container was created without.

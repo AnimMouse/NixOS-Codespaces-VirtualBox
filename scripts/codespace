@@ -1,7 +1,10 @@
 # codespace — bring dev containers up and down, Codespaces style.
 #
 #   codespace up <url|path|name>   create/start a dev container and its editor
+#   codespace new <name>           the same, on an empty workspace — no repo
+#   codespace rebuild <name>       recreate the container, keeping the port
 #   codespace down <name>          stop it (the CLI has no `down` of its own)
+#   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
 #   codespace list                 what exists, on which port
 #   codespace logs <name>          editor log, for when the URL does not answer
 #
@@ -24,6 +27,7 @@ usage() {
   cat >&2 <<'USAGE'
 usage:
   codespace up <url|path|name>   create/start a dev container and its editor
+  codespace new <name>           the same, on an empty workspace — no repo
   codespace rebuild <name|path>  recreate it from scratch, keeping the port
   codespace down <name>          stop it, keeping the container
   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
@@ -366,6 +370,28 @@ cmd_down() {
   fi
 }
 
+cmd_new() {
+  [ $# -ge 1 ] || usage
+  local name
+  name=$(slugify "$1")
+  [ -n "$name" ] || die "give the codespace a name"
+
+  if [ -e "$REPOS/$name" ] && [ ! -d "$REPOS/$name" ]; then
+    die "$REPOS/$name exists and is not a directory"
+  fi
+
+  if [ -d "$REPOS/$name" ]; then
+    note "$REPOS/$name already exists — starting it"
+  else
+    note "creating an empty workspace at $REPOS/$name"
+    mkdir -p "$REPOS/$name"
+  fi
+
+  # Deliberately not `git init`: an empty directory is the whole point, and
+  # guessing that you want a repo here would be presumptuous.
+  cmd_up "$name"
+}
+
 cmd_rm() {
   [ $# -ge 1 ] || usage
   local name cid keep_repo=1
@@ -423,6 +449,7 @@ cmd_logs() {
 sub="$1"; shift
 case "$sub" in
   up)    cmd_up "$@" ;;
+  new|blank) cmd_new "$@" ;;
   rebuild)
          [ $# -ge 1 ] || usage
          cmd_up "$1" recreate ;;
@@ -431,5 +458,5 @@ case "$sub" in
   list|ls) cmd_list "$@" ;;
   logs)  cmd_logs "$@" ;;
   -h|--help|help) usage 0 ;;
-  *)     die "unknown command '$sub' (try: up, rebuild, down, rm, list, logs)" ;;
+  *)     die "unknown command '$sub' (try: up, new, rebuild, down, rm, list, logs)" ;;
 esac
