@@ -5,8 +5,6 @@
 
   programs.git = {
     enable = true;
-    userName = gitIdentity.name;
-    userEmail = gitIdentity.email;
 
     signing = {
       format = "ssh";
@@ -16,7 +14,14 @@
       signByDefault = true;
     };
 
-    extraConfig = {
+    # One freeform attrset, mirroring gitconfig's own structure. `userName`,
+    # `userEmail` and `extraConfig` were all folded into this.
+    settings = {
+      user = {
+        name = gitIdentity.name;
+        email = gitIdentity.email;
+      };
+
       gpg.ssh.allowedSignersFile = gitIdentity.allowedSigners;
 
       init.defaultBranch = "main";
@@ -37,12 +42,36 @@
 
   programs.ssh = {
     enable = true;
-    matchBlocks."github.com" = {
-      user = "git";
-      identityFile = gitIdentity.keyFile;
-      # Without this, ssh offers every key it can find and GitHub rejects the
-      # connection after too many failures.
-      identitiesOnly = true;
+
+    # The implicit `Host *` block is on its way out, so spell it out. These are
+    # exactly home-manager's own outgoing defaults — copied verbatim so
+    # that turning the option off changes nothing about the generated config.
+    enableDefaultConfig = false;
+
+    settings = {
+      # entryBefore keeps this ahead of `Host *`. Nothing currently overlaps, but
+      # ssh_config takes the *first* value it sees for a keyword, so a specific
+      # block that lands after the wildcard silently stops winning.
+      "github.com" = lib.hm.dag.entryBefore [ "*" ] {
+        User = "git";
+        IdentityFile = gitIdentity.keyFile;
+        # Without this, ssh offers every key it can find and GitHub rejects the
+        # connection after too many failures.
+        IdentitiesOnly = true;
+      };
+
+      "*" = {
+        ForwardAgent = false;
+        AddKeysToAgent = "no";
+        Compression = false;
+        ServerAliveInterval = 0;
+        ServerAliveCountMax = 3;
+        HashKnownHosts = false;
+        UserKnownHostsFile = "~/.ssh/known_hosts";
+        ControlMaster = "no";
+        ControlPath = "~/.ssh/master-%r@%n:%p";
+        ControlPersist = "no";
+      };
     };
   };
 

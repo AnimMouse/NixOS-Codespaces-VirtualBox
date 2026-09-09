@@ -28,7 +28,10 @@ in
     backupFileExtension = "hm-bak";
 
     extraSpecialArgs = { inherit gitIdentity; };
-    users.dev = import ../home/dev.nix;
+    # The path, not `import` of it: importing loses the file provenance, so
+    # home-manager's evaluation warnings get blamed on this file instead of the
+    # one that actually sets the option.
+    users.dev = ../home/dev.nix;
   };
 
   # GitHub's host keys, scanned once on the VM and shared with every container
