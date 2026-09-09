@@ -101,6 +101,30 @@ sudo systemctl restart git-allowed-signers
 gh auth login                             # device flow: open the URL in Firefox on Windows
 ```
 
+### If your key has a passphrase
+
+Then it needs to be in the ssh-agent before any container can use it:
+
+```bash
+ssh-add /persist/git/id_ed25519           # prompts once
+ssh-add -l                                # should list the key
+```
+
+**Why it is not optional.** Containers have no terminal to prompt at, so a
+locked key simply cannot be used there — and ssh reports that as
+`Permission denied (publickey)`, which looks exactly like a key that was never
+registered on GitHub. `codespace up` detects the case and says so explicitly
+rather than leaving you to guess.
+
+A user ssh-agent runs as a systemd service, so its socket is
+`/run/user/1000/ssh-agent` on every boot, and lingering keeps it alive when you
+log out. That means the socket a container was created with is still the right
+one at your next login. `AddKeysToAgent yes` is set, so the first `ssh` or `git`
+of the boot adds the key after a single prompt.
+
+Only the **socket** is handed to containers, never the key — which makes this
+strictly safer than a passphrase-less key on disk, not just more convenient.
+
 ## 4. Point the launcher at your dotfiles
 
 Optional. Create `/persist/codespace/config`:
@@ -231,8 +255,20 @@ The VM rewrites GitHub https URLs to SSH:
 That is what lets `codespace up github.com/you/private-repo` work — the launcher
 clones the https form and git quietly authenticates with the key.
 
-**Containers** get `/persist/git` bind-mounted at `/mnt/git-ssh`, so they push
-and sign with the same key. Nothing is copied into the container.
+**Containers** get `/persist/git` bind-mounted at `/mnt/git-ssh` for the public
+key, `known_hosts` and `allowed_signers`. How they *authenticate* depends on
+what is available, checked in this order:
+
+| | Used when | What the container gets |
+|---|---|---|
+| **ssh-agent** | the agent is running and holds a key | the agent socket at `/tmp/ssh-agent.sock`. The private key never leaves the VM |
+| **key file** | no agent, and the key has no passphrase | `GIT_SSH_COMMAND` pointing at the mounted key |
+| **neither** | the key is passphrase-locked and no agent holds it | a loud warning naming the `ssh-add` to run |
+
+With the agent, `git clone`, `git push` and commit signing inside the container
+all work with **no passphrase prompt** — the crypto happens back on the VM.
+Signing works because `user.signingkey` is the *public* key, and `ssh-keygen -Y
+sign` will use the agent when the private half is unreadable.
 
 **`gh` in containers.** On the VM the login lives in `~/.config/gh`, which is on
 `/persist` — so it survives a reboot *and* a `system.vdi` wipe. Containers have
@@ -396,6 +432,7 @@ install script runs after every `up`), and stopping a container at all.
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
+| `git@github.com: Permission denied (publickey)` inside a container | Either the key is passphrase-locked with no agent holding it — `ssh-add /persist/git/id_ed25519`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |
 | No Pylance / no official C/C++ extension | code-server uses Open VSX. Pick equivalents in `devcontainer.json` `customizations` |

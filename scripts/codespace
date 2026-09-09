@@ -180,16 +180,44 @@ cmd_up() {
   # programmable completion, so compgen does not exist and the test silently
   # takes the wrong branch. With nullglob unset, a pattern that matches nothing
   # survives literally and fails -e.
-  local git_want="" ssh_cmd=""
-  local -a git_keys=(/persist/git/id_*)
-  if [ -e "${git_keys[0]}" ]; then
-    args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
-    git_want="keyfile"
-    ssh_cmd="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"
-  elif [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
+  local git_want="" ssh_cmd="" key=/persist/git/id_ed25519
+  local have_key=0 key_locked=0 have_agent=0
+
+  [ -r "$key" ] && have_key=1
+  # An encrypted key is still perfectly readable — it just cannot be *used*
+  # without a passphrase, and a container has no terminal to ask at. Detect it
+  # up front rather than letting ssh fail with a message that looks exactly
+  # like an unregistered key.
+  if [ "$have_key" = 1 ] && ! ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
+    key_locked=1
+  fi
+  # `ssh-add -l` exits non-zero both when the agent is unreachable and when it
+  # holds nothing, which are the same thing for our purposes.
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then
+    have_agent=1
+  fi
+
+  # /persist/git carries the public key, known_hosts and allowed_signers as
+  # well as the private key, so mount it whenever it exists. The dotfiles read
+  # the .pub from there to configure signing even when it is the agent, not the
+  # file, that does the actual crypto.
+  [ "$have_key" = 1 ] && args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
+
+  if [ "$have_agent" = 1 ]; then
+    # Preferred whenever available: the container gets a socket, never a key,
+    # and a passphrase-protected key works without anything to prompt at.
     args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=/tmp/ssh-agent.sock")
     git_want="agent"
-    ssh_cmd="ssh -o IdentityAgent=/tmp/ssh-agent.sock"
+    ssh_cmd="ssh"
+  elif [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; then
+    git_want="keyfile"
+    ssh_cmd="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"
+  elif [ "$key_locked" = 1 ]; then
+    note "warning: $key has a passphrase and no ssh-agent is holding it."
+    note "         Containers cannot prompt, so git inside this one will fail"
+    note "         with 'Permission denied (publickey)'. Unlock it with:"
+    note "             ssh-add $key"
+    note "         then: codespace rebuild $name"
   fi
 
   # The dotfiles clone runs *inside* the container, before anything this script
@@ -201,8 +229,13 @@ cmd_up() {
   # github https URLs to SSH. This makes DOTFILES_REPOSITORY work as either an
   # https or an ssh URL, private or not.
   if [ -n "$ssh_cmd" ]; then
-    ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/mnt/git-ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+    # known_hosts only exists inside the container if /persist/git was mounted.
+    if [ "$have_key" = 1 ]; then
+      ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/mnt/git-ssh/known_hosts"
+    fi
+    ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=accept-new"
     args+=(--remote-env "GIT_SSH_COMMAND=$ssh_cmd")
+    [ "$git_want" = agent ] && args+=(--remote-env "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
     args+=(--remote-env "GIT_CONFIG_COUNT=1")
     args+=(--remote-env "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf")
     args+=(--remote-env "GIT_CONFIG_VALUE_0=https://github.com/")
@@ -235,9 +268,13 @@ cmd_up() {
   mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$cid")
   case " $mounts " in
     *" /tmp/ssh-agent.sock "*) git_ssh="agent" ;;
-    *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
+    # /mnt/git-ssh is mounted for the .pub and known_hosts even when the private
+    # key is locked, so its presence alone does not mean git can authenticate.
+    *" /mnt/git-ssh "*)
+      if [ "$key_locked" = 1 ]; then git_ssh="locked"; else git_ssh="keyfile"; fi
+      ;;
   esac
-  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ]; then
+  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != locked ]; then
     note "note: this container was created with git credentials '$git_ssh:-none';"
     note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
   fi
@@ -289,8 +326,13 @@ cmd_up() {
   {
     echo "export CODESPACE_NAME=$name"
     case "$git_ssh" in
-      agent)   echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock' ;;
-      keyfile) echo 'export GIT_SSH_COMMAND="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"' ;;
+      agent)
+        echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock'
+        echo "export GIT_SSH_COMMAND=\"$ssh_cmd\""
+        ;;
+      keyfile)
+        echo "export GIT_SSH_COMMAND=\"$ssh_cmd\""
+        ;;
     esac
     # Deliberately unexpanded: $HOME has to resolve inside the container at
     # login, not out here.
@@ -322,8 +364,8 @@ cmd_up() {
     local -a envargs=(-e "PASSWORD=$(editor_password)")
     [ -n "$gh_token" ] && envargs+=(-e "GH_TOKEN=$gh_token")
     case "$git_ssh" in
-      agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock) ;;
-      keyfile) envargs+=(-e "GIT_SSH_COMMAND=ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes") ;;
+      agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
+      keyfile) envargs+=(-e "GIT_SSH_COMMAND=$ssh_cmd") ;;
     esac
     docker exec -d -u "$remote_user" "${envargs[@]}" "$cid" bash -lc \
       "printf '%s' \"$want\" > /tmp/code-server.args
@@ -348,8 +390,9 @@ cmd_up() {
   echo "  $name is up"
   echo "  http://localhost:$port/"
   echo "  password: $(editor_password)"
-  [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded"
+  [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
+  [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
   [ -n "$gh_token" ] && echo "  gh:  authenticated with the VM's token"
   [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
   echo

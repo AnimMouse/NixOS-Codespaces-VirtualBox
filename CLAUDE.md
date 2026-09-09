@@ -241,6 +241,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **nixpkgs bash has no `compgen`** — built without programmable completion, so it returns 127 and the branch silently reads false. shellcheck does not catch it | Glob into an array and test `[ -e "${arr[0]}" ]` |
 | **`pgrep -f` inside `sh -c` matches itself**, because the pattern is in the shell's own command line | Bracket the first character: `[c]ode-server` |
 | **`docker system prune` deletes stopped containers**, and `codespace down` stops rather than removes | `autoPrune.flags = [ "--filter" "until=168h" ]` |
+| **A passphrase-protected key cannot be used where nothing can prompt** — and ssh reports it as `Permission denied (publickey)`, identical to an unregistered key | A user ssh-agent (`services.ssh-agent` + `users.users.dev.linger`) at the stable `/run/user/1000/ssh-agent`; the launcher forwards the socket, never the key. It detects a locked key with `ssh-keygen -y -P ""` and names the `ssh-add` to run rather than letting git fail opaquely |
 
 ---
 

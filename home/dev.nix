@@ -62,7 +62,11 @@
 
       "*" = {
         ForwardAgent = false;
-        AddKeysToAgent = "no";
+        # "yes", against home-manager's old default of "no": the signing key
+        # has a passphrase, and this means the first ssh of the boot adds it to
+        # the agent after one prompt instead of asking on every single
+        # connection.
+        AddKeysToAgent = "yes";
         Compression = false;
         ServerAliveInterval = 0;
         ServerAliveCountMax = 3;
@@ -74,6 +78,16 @@
       };
     };
   };
+
+  # A passphrase-protected key cannot be used by anything that has no terminal
+  # to prompt at — which is every container the launcher creates, and the
+  # dotfiles clone in particular. The agent holds the decrypted key, and only
+  # its socket is handed to containers, so the key itself never leaves the VM.
+  #
+  # Socket is $XDG_RUNTIME_DIR/ssh-agent, i.e. /run/user/1000/ssh-agent: the
+  # same path every login, which is what makes a container created in one
+  # session still work in the next.
+  services.ssh-agent.enable = true;
 
   # For the API — creating repos, opening PRs. Git transport stays on SSH so
   # there is only one credential that can expire, and it never does.

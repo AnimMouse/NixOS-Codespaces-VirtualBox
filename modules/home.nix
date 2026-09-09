@@ -34,6 +34,11 @@ in
     users.dev = ../home/dev.nix;
   };
 
+  # Without lingering, /run/user/1000 and everything in it — the ssh-agent
+  # included — is torn down when the last session ends, and containers holding
+  # a mount to the agent socket break until the next login.
+  users.users.dev.linger = true;
+
   # GitHub's host keys, scanned once on the VM and shared with every container
   # through the /persist/git mount. Without this a container cloning over SSH
   # has nothing to verify github.com against, and the clone either prompts (and
