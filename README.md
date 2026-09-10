@@ -212,6 +212,7 @@ with it.
 | Inside the container | Backed by | Survives `codespace rebuild` / `rm` |
 |---|---|---|
 | `/workspaces/<name>` | `/persist/repos/<name>` | **yes** |
+| `/workspaces/refs` | `/persist/refs` | **yes**, and shared with every codespace |
 | `/workspaces/anything-else` | container layer | no |
 | `$HOME`, `/tmp`, installed packages | container layer | no |
 
@@ -221,12 +222,36 @@ which is the good outcome. With `sudo` it will succeed, and *that* is the trap:
 the clone sits next to your real repo, looks identical, and is gone on the next
 rebuild.
 
-For a second repo, make it a second codespace — that is what the tool is for:
+### Reference repos: `/workspaces/refs`
+
+In real Codespaces `/workspaces` is itself persistent, so cloning a repo next to
+your project for reference just works. Here only the project is a mount — so
+`/persist/refs` is mounted at **`/workspaces/refs`** in every container to give
+you the same shape:
+
+```bash
+cd /workspaces/refs && git clone https://github.com/someone/library
+cd /workspaces/proj && ls ../refs/library      # sibling, exactly as before
+```
+
+It persists, and it is deliberately **shared across every codespace** — clone a
+big reference repo once and they can all read it. That also means it is the
+wrong place for anything project-specific or secret. `CONTAINER_REFS=0` in
+`/persist/codespace/config` turns the mount off.
+
+Because it is a real mount, `rebuild` and `rm` do not warn about it.
+
+### A second project
+
+Make it a second codespace, rather than a second checkout in one:
 
 ```bash
 codespace up github.com/you/other-project
 codespace new scratch                       # or an empty one
 ```
+
+Each gets its own container, port and editor. Use `refs` for things you only
+want to *read*, and a codespace for things you want to work in.
 
 `codespace rebuild` and `codespace rm` now list anything under `/workspaces`
 that is not the mount before they discard the container, so you get a chance to
@@ -470,6 +495,7 @@ It is used **only while the repo has no config of its own**. Commit a real
 ```
 /persist/dev-vm/         this repo, for the rebuild loop
 /persist/repos/          project checkouts
+/persist/refs/           reference checkouts, shared read/write with all containers
 /persist/git/            the SSH key, your identity, allowed_signers, known_hosts
 /persist/ssh/            SSH host keys — machine identity, not yours
 /persist/home/dev/       the dev user's home (/home/dev symlinks here)

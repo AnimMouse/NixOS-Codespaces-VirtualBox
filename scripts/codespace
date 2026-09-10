@@ -15,6 +15,7 @@
 PORT_MIN=8001
 PORT_MAX=8010
 REPOS=/persist/repos
+REFS=/persist/refs
 STATE=/persist/codespace
 PW_FILE=/persist/code-server/pw
 EDITOR_PORT=8080
@@ -269,6 +270,14 @@ cmd_up() {
       args+=(--mount "type=bind,source=/persist/git/known_hosts,target=/mnt/git-ssh/known_hosts")
       have_known_hosts=1
     fi
+  fi
+
+  # Reference checkouts, as a sibling of the project — the same shape as real
+  # Codespaces, where /workspaces itself persists. Shared across containers on
+  # purpose: clone a big reference repo once and every codespace can read it.
+  # CONTAINER_REFS=0 in the launcher config turns it off.
+  if [ "${CONTAINER_REFS:-1}" != 0 ] && [ -d "$REFS" ] && [ "$name" != refs ]; then
+    args+=(--mount "type=bind,source=$REFS,target=/workspaces/refs")
   fi
 
   # The dotfiles clone runs *inside* the container, before anything this script
@@ -540,11 +549,16 @@ warn_ephemeral() {
   cid=$(container_of "$name") || true
   [ -n "$cid" ] || return 0
 
-  kept=$(basename "$(cat "$STATE/$name/remote_workspace" 2>/dev/null || echo "$name")")
+  # Every bind mount under /workspaces is backed by something on /persist — the
+  # project itself and, when enabled, refs. Ask docker rather than assuming, so
+  # adding a mount later cannot turn into a false alarm.
+  kept=$(docker inspect "$cid" \
+    | jq -r '.[0].Mounts[] | select(.Destination | startswith("/workspaces/")) | .Destination' \
+    2>/dev/null | xargs -r -n1 basename || true)
 
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    [ "$entry" = "$kept" ] && continue
+    printf '%s\n' "$kept" | grep -qxF "$entry" && continue
     if [ "$found" = 0 ]; then
       note "warning: these are not on /persist and will be lost:"
       found=1
@@ -552,7 +566,7 @@ warn_ephemeral() {
     note "             /workspaces/$entry"
   done < <(docker exec "$cid" sh -c 'ls -1 /workspaces 2>/dev/null' 2>/dev/null || true)
 
-  [ "$found" = 1 ] && note "         only /workspaces/$kept is backed by /persist/repos"
+  [ "$found" = 1 ] && note "         only the mounted directories are on /persist"
   return 0
 }
 

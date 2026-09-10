@@ -60,6 +60,11 @@ in
 
   systemd.tmpfiles.rules = [
     "d /persist/codespace 0755 dev users -"
+    # Reference checkouts, mounted into every container at /workspaces/refs.
+    # In real Codespaces /workspaces is itself persistent, so cloning a repo
+    # next to your project for reference just works; here only the project is a
+    # mount, so this is the equivalent that survives.
+    "d /persist/refs      0755 dev users -"
     # Optional: a git identity for containers to push with, when no ssh agent
     # is being forwarded. Holds only that key — never the host keys in
     # /persist/ssh, which are root-owned and useless for git anyway.
