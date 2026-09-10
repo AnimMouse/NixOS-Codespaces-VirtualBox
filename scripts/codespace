@@ -16,6 +16,9 @@ PORT_MIN=8001
 PORT_MAX=8010
 REPOS=/persist/repos
 REFS=/persist/refs
+# Mounted at /workspaces/$REFS_NAME, which makes it a reserved codespace name:
+# a codespace called the same thing would land on the same path.
+REFS_NAME=refs
 STATE=/persist/codespace
 PW_FILE=/persist/code-server/pw
 EDITOR_PORT=8080
@@ -46,8 +49,26 @@ slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's![^a-z0-9._-]!-!g; s!
 
 # Accepts a git URL, an absolute path, or the name of something already in
 # /persist/repos. Echoes "<name> <workspace-folder>".
+# Refused rather than allowed to shadow: a codespace called $REFS_NAME mounts
+# its own workspace over /workspaces/$REFS_NAME, and every reference repo
+# silently disappears from that container. Checked against the *resolved* name,
+# because a URL like github.com/someone/refs also lands on it.
+reject_reserved() {
+  [ "$1" = "$REFS_NAME" ] || return 0
+  die "'$REFS_NAME' is reserved — /workspaces/$REFS_NAME is the shared reference mount.
+  Use another name: git clone <url> $REPOS/${REFS_NAME}-something && codespace up ${REFS_NAME}-something
+  Reference checkouts themselves go in $REFS, no codespace needed."
+}
+
 resolve_workspace() {
   local target="$1" name dir
+
+  # A bare `codespace up refs` never resolves to anything, so catch it here for
+  # the useful message rather than letting it fall through to "no such repo".
+  case "$target" in
+    *://*|*@*:*|*/*) ;;
+    *) reject_reserved "$(slugify "$target")" ;;
+  esac
 
   # A codespace that already exists is addressable by name alone, so that
   # `up`/`rebuild` take the same argument as `down`/`logs` once it is created.
@@ -55,6 +76,7 @@ resolve_workspace() {
   if [ -f "$STATE/$name/workspace" ]; then
     dir=$(cat "$STATE/$name/workspace")
     if [ -d "$dir" ]; then
+      reject_reserved "$name"
       echo "$name $dir"; return
     fi
   fi
@@ -62,11 +84,13 @@ resolve_workspace() {
   if [ -d "$target" ]; then
     dir=$(realpath "$target")
     name=$(slugify "$(basename "$dir")")
+    reject_reserved "$name"
     echo "$name $dir"; return
   fi
 
   if [ -d "$REPOS/$target" ]; then
     name=$(slugify "$target")
+    reject_reserved "$name"
     echo "$name $REPOS/$target"; return
   fi
 
@@ -81,6 +105,8 @@ resolve_workspace() {
   esac
 
   name=$(slugify "$(basename "${url%.git}")")
+  # Before the clone, so a reserved name costs nothing.
+  reject_reserved "$name"
   dir="$REPOS/$name"
   if [ ! -d "$dir" ]; then
     note "cloning $url -> $dir"
@@ -276,8 +302,10 @@ cmd_up() {
   # Codespaces, where /workspaces itself persists. Shared across containers on
   # purpose: clone a big reference repo once and every codespace can read it.
   # CONTAINER_REFS=0 in the launcher config turns it off.
-  if [ "${CONTAINER_REFS:-1}" != 0 ] && [ -d "$REFS" ] && [ "$name" != refs ]; then
-    args+=(--mount "type=bind,source=$REFS,target=/workspaces/refs")
+  # The name guard in resolve_workspace makes the collision unreachable for new
+  # codespaces; this keeps a pre-existing one from failing on a duplicate mount.
+  if [ "${CONTAINER_REFS:-1}" != 0 ] && [ -d "$REFS" ] && [ "$name" != "$REFS_NAME" ]; then
+    args+=(--mount "type=bind,source=$REFS,target=/workspaces/$REFS_NAME")
   fi
 
   # The dotfiles clone runs *inside* the container, before anything this script
@@ -519,6 +547,8 @@ cmd_new() {
   local name
   name=$(slugify "$1")
   [ -n "$name" ] || die "give the codespace a name"
+  # Before mkdir, so a refused name leaves nothing behind.
+  reject_reserved "$name"
 
   if [ -e "$REPOS/$name" ] && [ ! -d "$REPOS/$name" ]; then
     die "$REPOS/$name exists and is not a directory"

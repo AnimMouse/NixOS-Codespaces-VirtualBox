@@ -241,6 +241,17 @@ wrong place for anything project-specific or secret. `CONTAINER_REFS=0` in
 
 Because it is a real mount, `rebuild` and `rm` do not warn about it.
 
+`refs` is a **reserved codespace name** — a codespace called that would mount its
+own workspace over `/workspaces/refs` and hide every reference repo from itself.
+`codespace up refs`, `codespace new refs` and a URL ending in `/refs` are all
+refused with a suggested alternative. A repo genuinely named `refs` still works;
+clone it under another name:
+
+```bash
+git clone https://github.com/someone/refs /persist/repos/refs-upstream
+codespace up refs-upstream
+```
+
 ### A second project
 
 Make it a second codespace, rather than a second checkout in one:
