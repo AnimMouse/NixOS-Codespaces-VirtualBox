@@ -197,27 +197,69 @@ cmd_up() {
     have_agent=1
   fi
 
-  # /persist/git carries the public key, known_hosts and allowed_signers as
-  # well as the private key, so mount it whenever it exists. The dotfiles read
-  # the .pub from there to configure signing even when it is the agent, not the
-  # file, that does the actual crypto.
-  [ "$have_key" = 1 ] && args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
+  # GIT_SSH_MODE in /persist/codespace/config, one of:
+  #
+  #   auto     (default) agent if one is loaded, else an unencrypted key file
+  #   agent    require the agent — fail rather than quietly exposing the key
+  #   keyfile  require the key file
+  #   none     no git credentials in containers at all
+  #
+  # `auto` is convenient but it downgrades silently: forget to `ssh-add` and it
+  # mounts the private key instead, which is the opposite of what someone who
+  # cares would want. `agent` makes that a hard error.
+  local mode="${GIT_SSH_MODE:-auto}"
+  case "$mode" in
+    auto|agent|keyfile|none) ;;
+    *) die "GIT_SSH_MODE must be auto, agent, keyfile or none (got '$mode')" ;;
+  esac
 
-  if [ "$have_agent" = 1 ]; then
-    # Preferred whenever available: the container gets a socket, never a key,
-    # and a passphrase-protected key works without anything to prompt at.
+  if [ "$mode" = agent ] || { [ "$mode" = auto ] && [ "$have_agent" = 1 ]; }; then
+    if [ "$have_agent" != 1 ]; then
+      die "GIT_SSH_MODE=agent, but no ssh-agent is holding a key. Run: ssh-add $key"
+    fi
+    # A passphrase-protected key works without anything to prompt at, and the
+    # crypto happens back on the VM.
     args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=/tmp/ssh-agent.sock")
     git_want="agent"
     ssh_cmd="ssh"
-  elif [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; then
+  elif [ "$mode" = keyfile ] || { [ "$mode" = auto ] && [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; }; then
+    if [ "$have_key" != 1 ]; then
+      die "GIT_SSH_MODE=keyfile, but there is no key at $key"
+    fi
+    if [ "$key_locked" = 1 ]; then
+      die "GIT_SSH_MODE=keyfile, but $key has a passphrase and nothing in a container can enter it. Use GIT_SSH_MODE=agent."
+    fi
     git_want="keyfile"
     ssh_cmd="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"
-  elif [ "$key_locked" = 1 ]; then
+  elif [ "$mode" = auto ] && [ "$key_locked" = 1 ]; then
     note "warning: $key has a passphrase and no ssh-agent is holding it."
     note "         Containers cannot prompt, so git inside this one will fail"
     note "         with 'Permission denied (publickey)'. Unlock it with:"
     note "             ssh-add $key"
     note "         then: codespace rebuild $name"
+  fi
+
+  # How much of /persist/git the container can see. Only the key-file mode has
+  # any use for the private key, so only that mode gets the directory. Every
+  # other mode gets the public half and known_hosts as individual file mounts —
+  # the container needs the .pub to configure signing (the agent does the
+  # crypto) and known_hosts to verify github, and neither is secret.
+  #
+  # Mounting the whole directory unconditionally, as this did until now, put the
+  # private key inside every container even when nothing there could use it.
+  local have_known_hosts=0
+  if [ "$git_want" = keyfile ]; then
+    args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
+    [ -r /persist/git/known_hosts ] && have_known_hosts=1
+  else
+    # Guarded: docker silently creates a *directory* at a bind source that does
+    # not exist, which would litter /persist/git and mount the wrong thing.
+    [ -r "$key.pub" ] && \
+      args+=(--mount "type=bind,source=$key.pub,target=/mnt/git-ssh/id_ed25519.pub")
+    if [ -r /persist/git/known_hosts ]; then
+      args+=(--mount "type=bind,source=/persist/git/known_hosts,target=/mnt/git-ssh/known_hosts")
+      have_known_hosts=1
+    fi
   fi
 
   # The dotfiles clone runs *inside* the container, before anything this script
@@ -229,8 +271,7 @@ cmd_up() {
   # github https URLs to SSH. This makes DOTFILES_REPOSITORY work as either an
   # https or an ssh URL, private or not.
   if [ -n "$ssh_cmd" ]; then
-    # known_hosts only exists inside the container if /persist/git was mounted.
-    if [ "$have_key" = 1 ]; then
+    if [ "$have_known_hosts" = 1 ]; then
       ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/mnt/git-ssh/known_hosts"
     fi
     ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=accept-new"
@@ -268,11 +309,10 @@ cmd_up() {
   mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$cid")
   case " $mounts " in
     *" /tmp/ssh-agent.sock "*) git_ssh="agent" ;;
-    # /mnt/git-ssh is mounted for the .pub and known_hosts even when the private
-    # key is locked, so its presence alone does not mean git can authenticate.
-    *" /mnt/git-ssh "*)
-      if [ "$key_locked" = 1 ]; then git_ssh="locked"; else git_ssh="keyfile"; fi
-      ;;
+    # The whole directory, so the private key is there and usable.
+    *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
+    # Only the public half — no way to authenticate from in here.
+    *" /mnt/git-ssh/id_ed25519.pub "*) git_ssh="locked" ;;
   esac
   if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != locked ]; then
     note "note: this container was created with git credentials '$git_ssh:-none';"

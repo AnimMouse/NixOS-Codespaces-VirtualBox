@@ -122,8 +122,10 @@ log out. That means the socket a container was created with is still the right
 one at your next login. `AddKeysToAgent yes` is set, so the first `ssh` or `git`
 of the boot adds the key after a single prompt.
 
-Only the **socket** is handed to containers, never the key — which makes this
-strictly safer than a passphrase-less key on disk, not just more convenient.
+In agent mode the container is handed the **socket**, plus the *public* key and
+`known_hosts` as individual file mounts. The private key stays on the VM — which
+makes this strictly safer than a passphrase-less key on disk, not just more
+convenient.
 
 ## 4. Point the launcher at your dotfiles
 
@@ -255,15 +257,31 @@ The VM rewrites GitHub https URLs to SSH:
 That is what lets `codespace up github.com/you/private-repo` work — the launcher
 clones the https form and git quietly authenticates with the key.
 
-**Containers** get `/persist/git` bind-mounted at `/mnt/git-ssh` for the public
-key, `known_hosts` and `allowed_signers`. How they *authenticate* depends on
-what is available, checked in this order:
+**How containers get credentials** — checked in this order, and what each mode
+actually exposes under `/mnt/git-ssh`:
 
-| | Used when | What the container gets |
-|---|---|---|
-| **ssh-agent** | the agent is running and holds a key | the agent socket at `/tmp/ssh-agent.sock`. The private key never leaves the VM |
-| **key file** | no agent, and the key has no passphrase | `GIT_SSH_COMMAND` pointing at the mounted key |
-| **neither** | the key is passphrase-locked and no agent holds it | a loud warning naming the `ssh-add` to run |
+| | Used when | Container gets | Private key exposed? |
+|---|---|---|---|
+| **ssh-agent** | the agent holds a key | the socket at `/tmp/ssh-agent.sock`, plus `id_ed25519.pub` and `known_hosts` as single-file mounts | **No** |
+| **key file** | no agent, and the key has no passphrase | the whole `/persist/git` directory, and `GIT_SSH_COMMAND` pointing at the key | Yes — it is the only way this mode can work |
+| **neither** | the key is passphrase-locked and no agent holds it | `id_ed25519.pub` and `known_hosts` only; a loud warning naming the `ssh-add` to run | No |
+
+The mode is chosen automatically, but you can pin it in
+`/persist/codespace/config`:
+
+```bash
+GIT_SSH_MODE=agent      # auto (default) | agent | keyfile | none
+```
+
+**`agent` is the one to set** if you care. The default `auto` is convenient but
+it downgrades silently — forget to `ssh-add` once and it mounts the private key
+into the container instead, which is precisely what you were avoiding.
+`GIT_SSH_MODE=agent` turns that into a hard error naming the `ssh-add` to run.
+It is also the only mode that can work at all with a passphrase-protected key.
+
+The public half is mounted in every mode because the container needs it to
+configure commit signing — `user.signingkey` is the `.pub`, and `ssh-keygen -Y
+sign` falls back to the agent when the private half is unreadable.
 
 With the agent, `git clone`, `git push` and commit signing inside the container
 all work with **no passphrase prompt** — the crypto happens back on the VM.
