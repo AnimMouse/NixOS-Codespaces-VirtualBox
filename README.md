@@ -428,7 +428,8 @@ install script runs after every `up`), and stopping a container at all.
 | Symptom | Cause |
 |---|---|
 | **Turtle icon** in the VirtualBox status bar | Hyper-V leaked back; performance drops 2–5×. `bcdedit /set hypervisorlaunchtype off`, reboot Windows |
-| Editor URL will not load | `codespace logs <name>`, then `systemctl status codespace-proxy@<name>` |
+| Editor URL will not load | `codespace up` now says which half is broken. Otherwise: `codespace logs <name>` for the editor, `systemctl status codespace-proxy@<name>` for the proxy |
+| `editor did not answer on port NNNN`, but `codespace logs` shows a healthy editor | The proxy, not the editor. A unit that failed repeatedly used to hit systemd's start rate limit and then refuse `restart` outright. Fixed by disabling the limit and calling `reset-failed`; to clear an already-wedged one: `sudo systemctl reset-failed codespace-proxy@<name>` |
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |

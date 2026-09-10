@@ -376,13 +376,37 @@ cmd_up() {
 
   # The CLI has no way to publish a port on a container it creates, so the
   # editor is reached through a proxy on the VM. See modules/codespace.nix.
-  sudo systemctl restart "codespace-proxy@$name.service"
+  #
+  # reset-failed first: a unit that hit its start limit refuses `restart`
+  # outright, and the failure is otherwise indistinguishable from a broken
+  # editor. And check the result — ignoring it is what made this look like the
+  # editor's fault.
+  sudo systemctl reset-failed "codespace-proxy@$name.service" 2>/dev/null || true
+  if ! sudo systemctl restart "codespace-proxy@$name.service"; then
+    die "could not start the editor proxy. See: systemctl status codespace-proxy@$name"
+  fi
 
   note "waiting for the editor"
   local i
   for i in $(seq 1 30); do
     if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/login" 2>/dev/null; then break; fi
-    [ "$i" = 30 ] && die "editor did not answer on port $port — try 'codespace logs $name'"
+    if [ "$i" = 30 ]; then
+      # "Nothing on the port" has two completely different causes with
+      # completely different fixes, so say which one it is rather than making
+      # the reader guess.
+      local cip
+      cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid" 2>/dev/null)
+      if [ -n "$cip" ] && curl -fsS -o /dev/null --max-time 3 "http://$cip:$EDITOR_PORT/login" 2>/dev/null; then
+        note "the editor is up inside the container at $cip:$EDITOR_PORT,"
+        note "but nothing answers on http://127.0.0.1:$port/ — so the proxy is at fault:"
+        note "    systemctl status codespace-proxy@$name"
+        note "    journalctl -u codespace-proxy@$name -n 20"
+      else
+        note "the editor is not answering inside the container either:"
+        note "    codespace logs $name"
+      fi
+      die "editor did not answer on port $port"
+    fi
     sleep 1
   done
 

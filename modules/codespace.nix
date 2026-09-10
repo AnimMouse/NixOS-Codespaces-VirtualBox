@@ -43,10 +43,17 @@ in
     description = "code-server proxy for codespace %i";
     after = [ "docker.service" ];
     requires = [ "docker.service" ];
+    # No start rate limit. This unit legitimately fails when its container is
+    # not up yet, and systemd's default (5 starts per 10s) then parks it in a
+    # failed state where `systemctl restart` is refused until `reset-failed` —
+    # which presents as the editor never answering, with nothing wrong with the
+    # editor.
+    unitConfig.StartLimitIntervalSec = 0;
+
     serviceConfig = {
       ExecStart = "${lib.getExe codespace-proxy} %i";
       Restart = "on-failure";
-      RestartSec = 2;
+      RestartSec = 5;
       DynamicUser = false;
     };
   };
