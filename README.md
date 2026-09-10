@@ -240,8 +240,9 @@ on the first commit — which is much better than quietly authoring everything a
 "Your Name".
 
 The VM's git config `include`s it, and `codespace up` mounts it into every
-container, so the VM and its containers author commits as the same person from
-one file. It also feeds `allowed_signers`, which needs the committer address to
+container *and* adds the include to the container's system git config — so it
+works whether or not you use a dotfiles repo. The VM and its containers author
+commits as the same person, from one file. It also feeds `allowed_signers`, which needs the committer address to
 verify your own signatures.
 
 It is deliberately **not** in this repo. A personal identity in a public flake
@@ -354,7 +355,10 @@ Two layers, deliberately separate.
 config, `gh`, bash aliases, tmux, direnv. Applied by `nixos-rebuild switch`.
 
 **Container layer** — a separate repo of plain bash, the same mechanism real
-Codespaces uses, so one repo works in both places. It finds its signing key in
+Codespaces uses, so one repo works in both places. Your identity does *not*
+depend on it: the launcher wires `/persist/git/identity` into the container's
+system git config directly, so a codespace with no dotfiles still commits as
+you. The dotfiles repo includes the same file, which is a harmless duplicate. It finds its signing key in
 this order:
 
 1. `/mnt/git-ssh/id_ed25519` — this VM's mount; used in place

@@ -363,6 +363,20 @@ cmd_up() {
     docker exec -u root "$cid" rm -f "$tokenfile" 2>/dev/null || true
   fi
 
+  # Wire the identity in at the container's *system* level, so `git commit`
+  # knows who you are whether or not you use a dotfiles repo. Mounting the file
+  # is not enough on its own — something has to include it, and until now only
+  # the dotfiles did, so a codespace without them committed with no author.
+  #
+  # `git config --system` rather than a literal /etc/gitconfig: the devcontainer
+  # git feature builds git from source, and the system config path follows its
+  # prefix. --replace-all keeps repeated `up` runs idempotent.
+  if docker exec "$cid" test -r /mnt/git-ssh/identity 2>/dev/null; then
+    docker exec -u root "$cid" \
+      git config --system --replace-all include.path /mnt/git-ssh/identity 2>/dev/null \
+      || note "note: could not set the git identity include (is git in the image?)"
+  fi
+
   # Login shells get the git env too; the editor's own terminals inherit it
   # from the code-server process below.
   local envfile
