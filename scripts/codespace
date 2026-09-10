@@ -145,7 +145,10 @@ cmd_up() {
     --workspace-folder "$ws"
     --id-label "codespace=$name"
   )
-  [ "$recreate" = recreate ] && args+=(--remove-existing-container)
+  if [ "$recreate" = recreate ]; then
+    args+=(--remove-existing-container)
+    warn_ephemeral "$name"
+  fi
 
   # Most repos have no devcontainer.json, and the CLI refuses to guess one.
   # --override-config is its documented answer ("required when there is no
@@ -529,6 +532,30 @@ cmd_new() {
 # daemon and authorised keys in every image, plus another forwarded port per
 # codespace, to reach something `docker exec` already reaches through the SSH
 # session you are sitting in.
+# Only /workspaces/<the repo> is a mount. Anything else under /workspaces, and
+# anything in $HOME, lives in the container's writable layer and dies with it.
+# Say so before throwing the container away, rather than after.
+warn_ephemeral() {
+  local name="$1" cid kept entry found=0
+  cid=$(container_of "$name") || true
+  [ -n "$cid" ] || return 0
+
+  kept=$(basename "$(cat "$STATE/$name/remote_workspace" 2>/dev/null || echo "$name")")
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ "$entry" = "$kept" ] && continue
+    if [ "$found" = 0 ]; then
+      note "warning: these are not on /persist and will be lost:"
+      found=1
+    fi
+    note "             /workspaces/$entry"
+  done < <(docker exec "$cid" sh -c 'ls -1 /workspaces 2>/dev/null' 2>/dev/null || true)
+
+  [ "$found" = 1 ] && note "         only /workspaces/$kept is backed by /persist/repos"
+  return 0
+}
+
 cmd_shell() {
   [ $# -ge 1 ] || usage
   local name cid ruser rws use_tmux=1
@@ -593,6 +620,7 @@ cmd_rm() {
   name=$(slugify "$1")
   [ "${2:-}" = "--repo" ] && keep_repo=0
 
+  warn_ephemeral "$name"
   sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
 
   cid=$(container_any "$name")

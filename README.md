@@ -203,6 +203,38 @@ it again on an existing name just starts that codespace, so it is safe to repeat
 Use `rebuild` after changing a `devcontainer.json`, or after adding an SSH key
 that a running container was created without.
 
+## What persists inside a codespace
+
+Only **`/workspaces/<name>`** is a bind mount of `/persist/repos/<name>`.
+Everything else in the container is the container's own writable layer, and dies
+with it.
+
+| Inside the container | Backed by | Survives `codespace rebuild` / `rm` |
+|---|---|---|
+| `/workspaces/<name>` | `/persist/repos/<name>` | **yes** |
+| `/workspaces/anything-else` | container layer | no |
+| `$HOME`, `/tmp`, installed packages | container layer | no |
+
+`/workspaces` itself is root-owned `755`, so a plain `cd .. && git clone` there
+fails with `Permission denied` rather than quietly writing somewhere temporary —
+which is the good outcome. With `sudo` it will succeed, and *that* is the trap:
+the clone sits next to your real repo, looks identical, and is gone on the next
+rebuild.
+
+For a second repo, make it a second codespace — that is what the tool is for:
+
+```bash
+codespace up github.com/you/other-project
+codespace new scratch                       # or an empty one
+```
+
+`codespace rebuild` and `codespace rm` now list anything under `/workspaces`
+that is not the mount before they discard the container, so you get a chance to
+notice.
+
+> `$HOME` not persisting is normal for dev containers and is why dotfiles are
+> reinstalled on every create. Put anything you want to keep in the workspace.
+
 ## A terminal without the browser
 
 `codespace shell <name>` opens a shell inside the container, from the SSH
