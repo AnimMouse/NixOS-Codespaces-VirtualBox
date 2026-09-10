@@ -3,6 +3,7 @@
 #   codespace up <url|path|name>   create/start a dev container and its editor
 #   codespace new <name>           the same, on an empty workspace — no repo
 #   codespace rebuild <name>       recreate the container, keeping the port
+#   codespace shell <name>         a terminal inside it, in a tmux on the VM
 #   codespace down <name>          stop it (the CLI has no `down` of its own)
 #   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
 #   codespace list                 what exists, on which port
@@ -29,6 +30,7 @@ usage:
   codespace up <url|path|name>   create/start a dev container and its editor
   codespace new <name>           the same, on an empty workspace — no repo
   codespace rebuild <name|path>  recreate it from scratch, keeping the port
+  codespace shell <name>         a terminal inside it, in a tmux on the VM
   codespace down <name>          stop it, keeping the container
   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
   codespace list                 what exists, on which port
@@ -305,6 +307,11 @@ cmd_up() {
   [ -n "$cid" ] || die "devcontainer up reported no container: $up_json"
   [ -n "$remote_ws" ] || die "devcontainer up reported no workspace folder: $up_json"
 
+  # Recorded so `codespace shell` can open a shell as the right user in the
+  # right directory without paying for another `devcontainer up`.
+  echo "$remote_user" > "$STATE/$name/remote_user"
+  echo "$remote_ws" > "$STATE/$name/remote_workspace"
+
   # What the container actually has, not what the host happened to offer. `up`
   # reuses an existing container and silently ignores changed --mount flags, so
   # trusting git_want here would configure the editor for a mount that is not
@@ -517,6 +524,69 @@ cmd_new() {
   cmd_up "$name"
 }
 
+# A terminal inside a codespace, from the VM — so you can work from Windows
+# Terminal instead of the browser. Not sshd in the container: that would mean a
+# daemon and authorised keys in every image, plus another forwarded port per
+# codespace, to reach something `docker exec` already reaches through the SSH
+# session you are sitting in.
+cmd_shell() {
+  [ $# -ge 1 ] || usage
+  local name cid ruser rws use_tmux=1
+  name=$(slugify "$1"); shift
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-tmux) use_tmux=0; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+
+  cid=$(container_of "$name")
+  [ -n "$cid" ] || die "$name is not running — 'codespace up $name' first"
+
+  # From state where `up` left it; otherwise dug back out of the container, so
+  # this still works for one created before that was recorded.
+  ruser=$(cat "$STATE/$name/remote_user" 2>/dev/null || true)
+  if [ -z "$ruser" ]; then
+    ruser=$(docker inspect "$cid" \
+      | jq -r '[.[0].Config.Labels."devcontainer.metadata" // "[]" | fromjson | .[]?.remoteUser // empty] | last // empty' \
+      2>/dev/null || true)
+  fi
+  [ -n "$ruser" ] || ruser=root
+
+  rws=$(cat "$STATE/$name/remote_workspace" 2>/dev/null || true)
+  if [ -z "$rws" ]; then
+    rws=$(docker inspect "$cid" \
+      | jq -r '.[0].Mounts[] | select(.Destination | startswith("/workspaces")) | .Destination' \
+      2>/dev/null | head -1 || true)
+  fi
+  [ -n "$rws" ] || rws=/
+
+  # -t only when there is a terminal to allocate, so `codespace shell x -- cmd`
+  # stays usable in a pipe or a script.
+  local -a dexec=(docker exec -i)
+  [ -t 0 ] && dexec+=(-t)
+  dexec+=(-u "$ruser" -w "$rws" "$cid")
+
+  # A one-shot command never wants a persistent session wrapped around it.
+  if [ $# -gt 0 ]; then
+    exec "${dexec[@]}" bash -lc "$*"
+  fi
+
+  # tmux lives on the VM, not in the container: it survives your SSH dropping,
+  # and it does not require every image to ship tmux. attach-or-create, so
+  # reconnecting puts you back in the same shell rather than a fresh one.
+  if [ "$use_tmux" = 1 ] && [ -z "${TMUX:-}" ] && [ -t 0 ]; then
+    local session cmd
+    session="cs-$(echo "$name" | tr '.:' '--')"
+    cmd=$(printf '%q ' "${dexec[@]}" bash -l)
+    exec tmux new-session -A -s "$session" "$cmd"
+  fi
+
+  exec "${dexec[@]}" bash -l
+}
+
 cmd_rm() {
   [ $# -ge 1 ] || usage
   local name cid keep_repo=1
@@ -579,9 +649,10 @@ case "$sub" in
          [ $# -ge 1 ] || usage
          cmd_up "$1" recreate ;;
   down)  cmd_down "$@" ;;
+  shell|sh) cmd_shell "$@" ;;
   rm|delete) cmd_rm "$@" ;;
   list|ls) cmd_list "$@" ;;
   logs)  cmd_logs "$@" ;;
   -h|--help|help) usage 0 ;;
-  *)     die "unknown command '$sub' (try: up, new, rebuild, down, rm, list, logs)" ;;
+  *)     die "unknown command '$sub' (try: up, new, shell, rebuild, down, rm, list, logs)" ;;
 esac

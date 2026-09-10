@@ -182,6 +182,7 @@ the password is shared with the hub editor and printed by `up`.
 | Command | What it does |
 |---|---|
 | `codespace up <url\|path\|name>` | Create or start it, and its editor |
+| `codespace shell <name>` | A terminal inside it, from your SSH session |
 | `codespace new <name>` | The same, on an empty workspace — no repo to clone |
 | `codespace rebuild <name>` | Recreate the container from scratch, same port |
 | `codespace down <name>` | Stop it. Fast to restart, keeps installed packages |
@@ -201,6 +202,37 @@ it again on an existing name just starts that codespace, so it is safe to repeat
 
 Use `rebuild` after changing a `devcontainer.json`, or after adding an SSH key
 that a running container was created without.
+
+## A terminal without the browser
+
+`codespace shell <name>` opens a shell inside the container, from the SSH
+session you are already in — no second browser tab, and no second SSH port:
+
+```bash
+ssh -p 2222 dev@localhost        # from Windows Terminal
+codespace shell project          # you are now inside the container
+```
+
+It lands as the container's own user, in the workspace folder, with the same
+git identity, `GH_TOKEN` and SSH access the editor's terminals get.
+
+**It runs inside a tmux session on the VM** (`cs-<name>`), so dropping your SSH
+connection does not kill what you were running — reconnect and
+`codespace shell project` puts you back in the same shell. tmux is on the VM
+rather than in the container on purpose: no image has to ship it, and the
+session survives the container being restarted under it.
+
+```bash
+codespace shell project -- npm test    # one-shot, no tmux, pipeable
+codespace shell project --no-tmux      # plain interactive shell
+```
+
+Already inside tmux? It will not nest — you get a plain shell.
+
+> **Why not SSH straight into the container?** It would mean an sshd and
+> authorised keys in every image, plus another forwarded port per codespace, to
+> reach something `docker exec` already reaches through the SSH session you are
+> sitting in. The editor ports are for editors; terminals come through here.
 
 ## Rebuilding the VM
 

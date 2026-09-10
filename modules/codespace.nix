@@ -29,7 +29,7 @@ let
 
   codespace = pkgs.writeShellApplication {
     name = "codespace";
-    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh curl jq coreutils gnused ];
+    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused ];
     text = builtins.readFile ../scripts/codespace;
   };
 in
