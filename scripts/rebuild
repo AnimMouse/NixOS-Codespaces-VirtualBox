@@ -1,0 +1,41 @@
+# rebuild [--pull] [extra nixos-rebuild arguments]
+#
+# The everyday `nixos-rebuild switch` for this VM, with the flake path already
+# filled in. --pull fetches this repo first, which is the usual reason for
+# rebuilding at all.
+#
+# Built by modules/tools.nix with pkgs.writeShellApplication.
+
+pull=0
+declare -a extra=()
+for arg in "$@"; do
+  case "$arg" in
+    --pull) pull=1 ;;
+    -h|--help)
+      # A heredoc, not `sed "$0"`: writeShellApplication prepends its own
+      # shebang and set-options, so line numbers here are not line numbers
+      # there.
+      cat >&2 <<'USAGE'
+usage: rebuild [--pull] [extra nixos-rebuild arguments]
+
+  --pull   git pull @FLAKE_DIR@ first (--ff-only)
+
+Anything else is passed straight to nixos-rebuild, e.g.
+  rebuild --pull --show-trace
+  rebuild --rollback
+USAGE
+      exit 0
+      ;;
+    *) extra+=("$arg") ;;
+  esac
+done
+
+if [ "$pull" = 1 ]; then
+  echo "==> pulling @FLAKE_DIR@"
+  # --ff-only so a dirty or diverged working copy stops here rather than
+  # producing a merge nobody asked for mid-rebuild.
+  git -C "@FLAKE_DIR@" pull --ff-only
+fi
+
+echo "==> nixos-rebuild switch --flake @FLAKE_DIR@#@FLAKE_ATTR@"
+exec sudo nixos-rebuild switch --flake "@FLAKE_DIR@#@FLAKE_ATTR@" "${extra[@]}"

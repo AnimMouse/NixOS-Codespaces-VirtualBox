@@ -84,6 +84,22 @@ ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
 cat /persist/git/id_ed25519.pub
 ```
 
+And tell git who you are. `/persist/git/identity` is created for you on first
+boot as an empty, commented template — you only have to fill it in:
+
+```bash
+git config -f /persist/git/identity user.name  "Your Name"
+git config -f /persist/git/identity user.email you@example.com
+```
+
+**Not `git config --global`** — that fails with `could not lock config file`,
+because home-manager owns `~/.config/git/config` as a read-only symlink into the
+nix store. The template says so, since git's own error message advises exactly
+the command that cannot work.
+
+This is the only place your name and email are written down, and it is not in
+this repo.
+
 Add that key at <https://github.com/settings/keys> **twice**:
 
 - once as an **Authentication key**
@@ -106,8 +122,7 @@ gh auth login                             # device flow: open the URL in Firefox
 Then it needs to be in the ssh-agent before any container can use it:
 
 ```bash
-ssh-add /persist/git/id_ed25519           # prompts once
-ssh-add -l                                # should list the key
+ssh-auth        # prompts once per boot; a no-op if already unlocked
 ```
 
 **Why it is not optional.** Containers have no terminal to prompt at, so a
@@ -192,11 +207,12 @@ that a running container was created without.
 After changing anything in this repo:
 
 ```bash
-cd /persist/dev-vm && git pull
-sudo nixos-rebuild switch --flake /persist/dev-vm#dev
+rebuild --pull          # git pull /persist/dev-vm, then switch
+rebuild                 # switch without pulling
+rebuild --rollback      # anything else goes straight to nixos-rebuild
 ```
 
-or just `rebuild` inside the VM — same thing. From Windows, without logging in:
+From Windows, without logging in:
 
 ```powershell
 ssh -p 2222 dev@localhost 'sudo nixos-rebuild switch --flake /persist/dev-vm#dev'
@@ -207,6 +223,35 @@ works: `ssh host 'sudo ...'` gets no TTY and cannot answer a prompt.
 
 To roll back a bad rebuild: `sudo nixos-rebuild switch --rollback`, or pick an
 older generation from the GRUB menu.
+
+## Your git identity
+
+`/persist/git/identity` is a gitconfig fragment, and the single place your name
+and email live. A first boot seeds it as comments only:
+
+```bash
+git config -f /persist/git/identity user.name  "Your Name"
+git config -f /persist/git/identity user.email you@example.com
+```
+
+The template carries no placeholder values on purpose. git ignores a
+comments-only include, so an unedited VM has *no* identity and asks who you are
+on the first commit — which is much better than quietly authoring everything as
+"Your Name".
+
+The VM's git config `include`s it, and `codespace up` mounts it into every
+container, so the VM and its containers author commits as the same person from
+one file. It also feeds `allowed_signers`, which needs the committer address to
+verify your own signatures.
+
+It is deliberately **not** in this repo. A personal identity in a public flake
+is both a privacy leak and a thing that silently disagrees with your dotfiles;
+keeping it on `/persist` means one file to edit and nothing to keep in sync.
+`paths.nix` at the repo root says where it lives, and holds no values.
+
+A missing include is silently ignored by git, so a VM without one has no
+identity and says so on the first commit — rather than authoring as someone
+else.
 
 ## The hub editor
 
@@ -357,7 +402,7 @@ It is used **only while the repo has no config of its own**. Commit a real
 ```
 /persist/dev-vm/         this repo, for the rebuild loop
 /persist/repos/          project checkouts
-/persist/git/            the SSH key, allowed_signers, known_hosts
+/persist/git/            the SSH key, your identity, allowed_signers, known_hosts
 /persist/ssh/            SSH host keys — machine identity, not yours
 /persist/home/dev/       the dev user's home (/home/dev symlinks here)
 /persist/docker/         images, volumes, containers
@@ -399,7 +444,11 @@ modules/
   codespace.nix                 launcher package + editor proxy unit
   home.nix                      home-manager wiring + git identity units
 home/dev.nix                    VM dotfiles: git, ssh, gh, bash, tmux
+  tools.nix                     the `rebuild` and `ssh-auth` commands
+paths.nix                       where identity and key material live (paths only)
 scripts/codespace               the launcher
+scripts/rebuild                 rebuild [--pull]
+scripts/ssh-auth                unlock the git key into the agent
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 docs/BOOTSTRAP.md               full install walkthrough
 CLAUDE.md                       design decisions and constraints
@@ -452,7 +501,7 @@ install script runs after every `up`), and stopping a container at all.
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
 | `codespace up` hangs at `Executing command ./install.sh...` | Something in the dotfiles install is waiting for input. The usual culprit is `ssh-keygen` on a passphrase-protected key: the tooling gives install.sh a tty, so it prompts and waits forever, and the prompt is usually swallowed. Ctrl-C, then `codespace rebuild <name>`. Keep every `ssh-keygen` in a dotfiles repo non-interactive with `-P ""` |
-| `git@github.com: Permission denied (publickey)` inside a container | Either the key is passphrase-locked with no agent holding it — `ssh-add /persist/git/id_ed25519`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
+| `git@github.com: Permission denied (publickey)` inside a container | Either the key is passphrase-locked with no agent holding it — `ssh-auth`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |
 | No Pylance / no official C/C++ extension | code-server uses Open VSX. Pick equivalents in `devcontainer.json` `customizations` |

@@ -16,12 +16,12 @@
 
     # One freeform attrset, mirroring gitconfig's own structure. `userName`,
     # `userEmail` and `extraConfig` were all folded into this.
-    settings = {
-      user = {
-        name = gitIdentity.name;
-        email = gitIdentity.email;
-      };
+    # Your name and email come from here, not from this repo. A missing include
+    # is silently ignored by git, so a VM without one simply has no identity and
+    # says so on the first commit — rather than authoring as someone else.
+    includes = [ { path = gitIdentity.identityFile; } ];
 
+    settings = {
       gpg.ssh.allowedSignersFile = gitIdentity.allowedSigners;
 
       init.defaultBranch = "main";

@@ -48,9 +48,9 @@
     "L+ /home/dev            -    -    -    - /persist/home/dev"
   ];
 
-  # This flake's own working copy. §3's rebuild loop reads it from here, so a
+  # This flake's own working copy lives at /persist/dev-vm, so a
   # `nixos-rebuild switch` keeps working after system.vdi has been thrown away.
-  # Cloned by hand once — see docs/BOOTSTRAP.md.
-  environment.shellAliases.rebuild =
-    "sudo nixos-rebuild switch --flake /persist/dev-vm#dev";
+  # Cloned by hand once — see docs/BOOTSTRAP.md. The `rebuild` command itself is
+  # a real script (modules/tools.nix), not an alias: an alias cannot take
+  # --pull, and would shadow the script anyway.
 }

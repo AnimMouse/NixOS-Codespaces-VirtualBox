@@ -256,6 +256,10 @@ cmd_up() {
     # not exist, which would litter /persist/git and mount the wrong thing.
     [ -r "$key.pub" ] && \
       args+=(--mount "type=bind,source=$key.pub,target=/mnt/git-ssh/id_ed25519.pub")
+    # Your name and email, so a container authors commits as the same person the
+    # VM does. Not secret, and the same file either way.
+    [ -r /persist/git/identity ] && \
+      args+=(--mount "type=bind,source=/persist/git/identity,target=/mnt/git-ssh/identity")
     if [ -r /persist/git/known_hosts ]; then
       args+=(--mount "type=bind,source=/persist/git/known_hosts,target=/mnt/git-ssh/known_hosts")
       have_known_hosts=1

@@ -1,0 +1,34 @@
+# ssh-auth — unlock the git key into the ssh-agent for this boot.
+#
+# Containers get the agent's socket, never the key, so nothing in a container
+# can prompt for a passphrase. This is the one prompt, once per boot.
+#
+# Built by modules/tools.nix with pkgs.writeShellApplication.
+
+KEY="@KEY_FILE@"
+
+if [ ! -r "$KEY" ]; then
+  echo "ssh-auth: no key at $KEY" >&2
+  echo "  create one with:  ssh-keygen -t ed25519 -f $KEY" >&2
+  exit 1
+fi
+
+if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
+  echo "ssh-auth: no ssh-agent for this session (\$SSH_AUTH_SOCK is unset or dead)." >&2
+  echo "  systemctl --user status ssh-agent" >&2
+  exit 1
+fi
+
+# Already loaded? Compare fingerprints rather than reloading and re-prompting.
+if [ -r "$KEY.pub" ]; then
+  fp=$(ssh-keygen -lf "$KEY.pub" | awk '{print $2}')
+  if ssh-add -l 2>/dev/null | grep -qF "$fp"; then
+    echo "already unlocked: $fp"
+    exit 0
+  fi
+fi
+
+ssh-add "$KEY"
+echo
+echo "Containers created before now still have the old credentials."
+echo "Pick it up with:  codespace rebuild <name>"

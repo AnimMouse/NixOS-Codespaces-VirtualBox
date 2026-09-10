@@ -118,15 +118,19 @@ hosts/dev/
 ├── configuration.nix          # top-level machine config
 ├── disko.nix                  # system.vdi  — SATA port 0
 └── disko-persist.nix          # persist.vdi — SATA port 1, SEPARATE on purpose
+paths.nix                      # where identity/key material live — paths, no values
 modules/
 ├── persist.nix                # /persist wiring, host key persistence
+├── tools.nix                  # the `rebuild` and `ssh-auth` commands
 ├── docker.nix                 # Docker + devcontainer CLI
 ├── code-server.nix            # hub editor + first-boot password generation
 ├── codespace.nix              # launcher package + editor proxy unit
 └── home.nix                   # home-manager wiring + git identity units
 home/dev.nix                   # home-manager: VM-layer dotfiles
 scripts/
-├── codespace                  # launcher: up / rebuild / down / rm / list / logs
+├── codespace                  # launcher: up / new / rebuild / down / rm / list / logs
+├── rebuild                    # rebuild [--pull]
+├── ssh-auth                   # unlock the git key into the agent
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
 .github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
@@ -145,6 +149,12 @@ Two files the sketch did not have, both earning their place:
 
 **VM layer:** home-manager, declared in `home/dev.nix`. Shell, tmux, git config
 for the VM itself.
+
+**Neither layer holds your name or email.** Those live in a gitconfig fragment
+at `/persist/git/identity`, which the VM's git config `include`s and the
+launcher mounts into every container. One file, both layers, nothing personal
+committed to a public repo, and no way for the two to disagree about who
+authored a commit. `paths.nix` records the location and no values.
 
 **Container layer:** a *separate* GitHub repo of plain bash, using the same
 mechanism GitHub Codespaces uses. The launcher passes:
@@ -242,6 +252,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **`pgrep -f` inside `sh -c` matches itself**, because the pattern is in the shell's own command line | Bracket the first character: `[c]ode-server` |
 | **`docker system prune` deletes stopped containers**, and `codespace down` stops rather than removes | `autoPrune.flags = [ "--filter" "until=168h" ]` |
 | **Anything in `install.sh` that waits for input hangs the container create forever.** The tooling runs it with a tty, so `ssh-keygen` on an encrypted key prompts — and with stderr discarded the prompt is invisible. It looks like `codespace up` stopping dead at "Executing command ./install.sh..." | Force every `ssh-keygen` non-interactive: `-P ""`, `SSH_ASKPASS_REQUIRE=never`, stdin closed. Never configure signing with a key that cannot be used without a prompt |
+| **`git config --global` cannot work on this VM** — home-manager owns `~/.config/git/config` as a symlink into the read-only store, so it fails with `could not lock config file`. git's own "please tell me who you are" advises exactly that command | Seed `/persist/git/identity` on first boot with comments only — no placeholder values, so an unedited VM has no identity rather than a fake one — and put the `git config -f` commands that do work in those comments |
 | **A proxy unit that fails a few times hits systemd's default start rate limit** (5 in 10s) and then refuses `systemctl restart` until `reset-failed` — presenting as "the editor did not answer" with a perfectly healthy editor | `StartLimitIntervalSec = 0` on the template unit; `reset-failed` before `restart` in the launcher, and check the exit status. On timeout, probe the container directly so the message names the guilty half |
 | **A passphrase-protected key cannot be used where nothing can prompt** — and ssh reports it as `Permission denied (publickey)`, identical to an unregistered key | A user ssh-agent (`services.ssh-agent` + `users.users.dev.linger`) at the stable `/run/user/1000/ssh-agent`; the launcher forwards the socket, never the key. It detects a locked key with `ssh-keygen -y -P ""` and names the `ssh-add` to run rather than letting git fail opaquely |
 
