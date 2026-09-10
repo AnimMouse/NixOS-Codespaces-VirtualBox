@@ -252,6 +252,32 @@ git clone https://github.com/someone/refs /persist/repos/refs-upstream
 codespace up refs-upstream
 ```
 
+### A faster apt mirror
+
+Containers apt-install from `archive.ubuntu.com` by default, which may be a long
+way from you. Point them somewhere nearer in `/persist/codespace/config`:
+
+```bash
+APT_MIRROR=http://mirror.rise.ph/ubuntu
+```
+
+`codespace up` rewrites `archive.ubuntu.com` and `security.ubuntu.com` (and
+regional variants like `azure.archive.ubuntu.com`) to that host, in both the
+deb822 `.sources` layout Ubuntu 24.04 uses and the older `.list` one, then runs
+`apt-get update` once — apt caches package lists per URL, so without that the
+next `apt install` just fails.
+
+It only fires when the sources still point at Ubuntu's own hosts, so a repeat
+`up` costs nothing. Unset it and nothing is touched.
+
+> **It cannot speed up devcontainer features.** Those apt-install during the
+> image *build*, before any container exists for this to run in. It speeds up
+> everything after: your own installs, `postCreateCommand`, anything in a
+> terminal.
+
+Make sure the mirror carries `-security` as well as the release and `-updates`,
+or you will silently stop getting security updates. `mirror.rise.ph` does.
+
 ### A second project
 
 Make it a second codespace, rather than a second checkout in one:

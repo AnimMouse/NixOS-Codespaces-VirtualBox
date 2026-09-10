@@ -424,6 +424,8 @@ cmd_up() {
       || note "note: could not set the git identity include (is git in the image?)"
   fi
 
+  [ -n "${APT_MIRROR:-}" ] && apply_apt_mirror "$cid" "$APT_MIRROR"
+
   # Login shells get the git env too; the editor's own terminals inherit it
   # from the code-server process below.
   local envfile
@@ -571,6 +573,39 @@ cmd_new() {
 # daemon and authorised keys in every image, plus another forwarded port per
 # codespace, to reach something `docker exec` already reaches through the SSH
 # session you are sitting in.
+# Point the container's apt at a nearer Ubuntu mirror. Opt-in via APT_MIRROR in
+# the launcher config, because the right mirror depends entirely on where you
+# are.
+#
+# This runs after the image is built, so it speeds up apt *inside* the container
+# — your own installs, postCreateCommand, anything later. It cannot speed up
+# devcontainer features, which apt-install during the build, before any of this
+# exists.
+apply_apt_mirror() {
+  local cid="$1" mirror="${2%/}/"
+
+  # Nothing to do if the sources already point somewhere else — which also makes
+  # a repeat `up` free rather than re-running apt-get update every time.
+  docker exec "$cid" sh -c \
+    'grep -rqE "https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null' \
+    2>/dev/null || return 0
+
+  note "pointing apt at $mirror"
+  # Both layouts: deb822 .sources (Ubuntu 24.04 onward) and legacy .list files.
+  # Regional mirrors like azure.archive.ubuntu.com are matched too.
+  docker exec -u root "$cid" sh -c '
+    mirror="$1"
+    files=$(ls /etc/apt/sources.list /etc/apt/sources.list.d/*.sources                /etc/apt/sources.list.d/*.list 2>/dev/null) || true
+    [ -n "$files" ] || exit 0
+    sed -i -E "s#https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu/?#${mirror}#g" $files
+  ' _ "$mirror" 2>/dev/null || { note "note: could not rewrite apt sources"; return 0; }
+
+  # apt caches package lists per URL, so they are stale the moment the URL
+  # changes; without this the next `apt install` just fails.
+  docker exec -u root "$cid" sh -c 'apt-get update -qq' >/dev/null 2>&1 \
+    || note "note: apt-get update against $mirror failed — run it yourself to see why"
+}
+
 # Only /workspaces/<the repo> is a mount. Anything else under /workspaces, and
 # anything in $HOME, lives in the container's writable layer and dies with it.
 # Say so before throwing the container away, rather than after.
