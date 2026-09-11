@@ -454,18 +454,27 @@ cmd_up() {
   # up with no workspace at all: the code is mounted and the container is fine,
   # but the file tree is empty and terminals start in $HOME.
   #
-  # The arguments are recorded next to the log so that an editor started by an
-  # older version of this script — or with a different folder — is replaced
-  # rather than left running.
+  # Liveness is asked of the editor over HTTP, not inferred from a process
+  # listing. `pgrep -f` was doing the latter and getting it wrong: the shell
+  # running the check had /tmp/code-server.args on its own command line, which
+  # supplied "code-server", while the pattern text supplied "--bind-addr", and
+  # `.*` bridged the two — so the check matched itself and reported a dead
+  # editor as running. After a VM reboot the args file survives in the container
+  # while the process does not, which is exactly when that mattered.
   #
-  # '[c]ode-server' rather than 'code-server': the pattern is being matched
-  # against full command lines, and the sh running pgrep has the pattern in its
-  # own, so an unbracketed pattern always matches itself.
-  local want="0.0.0.0:$EDITOR_PORT $remote_ws"
-  if ! docker exec "$cid" sh -c \
-       "[ \"\$(cat /tmp/code-server.args 2>/dev/null)\" = \"$want\" ] \
-        && pgrep -f '[c]ode-server.*--bind-addr' >/dev/null" 2>/dev/null
-  then
+  # Asking the endpoint is also the thing we actually care about: an editor that
+  # is running but not answering is no more use than one that is gone.
+  local want="0.0.0.0:$EDITOR_PORT $remote_ws" have="" cip="" editor_live=0
+  cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid" 2>/dev/null)
+  if [ -n "$cip" ] && curl -fsS -o /dev/null --max-time 3 "http://$cip:$EDITOR_PORT/login" 2>/dev/null; then
+    editor_live=1
+  fi
+  # The arguments are recorded next to the log so an editor started by an older
+  # version of this script — or on a different folder — is replaced rather than
+  # left running.
+  have=$(docker exec "$cid" cat /tmp/code-server.args 2>/dev/null || true)
+
+  if [ "$editor_live" = 0 ] || [ "$have" != "$want" ]; then
     note "starting editor on $remote_ws"
     docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
     local -a envargs=(-e "PASSWORD=$(editor_password)")
