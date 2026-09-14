@@ -300,6 +300,20 @@ cmd_up() {
     fi
   fi
 
+  # Create-time secrets: --secrets-file reaches the user commands that run
+  # during `up`, including the dotfiles install — which is where a Codespaces
+  # secret like $SSH_ANIMMOZ_KEY is expected. It takes a path, so nothing lands
+  # on a command line where `ps` could read it. It does *not* persist into the
+  # container, which is handled separately after `up`.
+  local secrets_json secrets_file=""
+  secrets_json=$(collect_secrets "$name")
+  if [ -n "$secrets_json" ] && [ "$secrets_json" != "{}" ]; then
+    secrets_file=$(mktemp)
+    chmod 600 "$secrets_file"
+    printf '%s' "$secrets_json" > "$secrets_file"
+    args+=(--secrets-file "$secrets_file")
+  fi
+
   # Reference checkouts, as a sibling of the project — the same shape as real
   # Codespaces, where /workspaces itself persists. Shared across containers on
   # purpose: clone a big reference repo once and every codespace can read it.
@@ -337,7 +351,8 @@ cmd_up() {
 
   note "starting dev container '$name' from $ws"
   # Progress and build logs go to stderr, so capturing stdout still shows them.
-  up_json=$(devcontainer "${args[@]}") || die "devcontainer up failed"
+  up_json=$(devcontainer "${args[@]}") || { [ -n "$secrets_file" ] && rm -f "$secrets_file"; die "devcontainer up failed"; }
+  [ -n "$secrets_file" ] && rm -f "$secrets_file"
   up_json=$(printf '%s\n' "$up_json" | tail -1)
 
   # Ask the CLI where things landed rather than guessing. remoteWorkspaceFolder
@@ -396,21 +411,33 @@ cmd_up() {
   remote_home=$(docker exec -u "$remote_user" "$cid" sh -c 'echo $HOME' 2>/dev/null | tr -d '\r')
   [ -n "$remote_home" ] || remote_home="/home/$remote_user"
 
-  # The token goes in a 0600 file of its own rather than into /etc/profile.d,
-  # which has to stay world-readable for login shells to source it.
-  local tokenfile="$remote_home/.codespace-token"
-  if [ -n "$gh_token" ]; then
-    local tmptok
-    tmptok=$(mktemp)
-    printf 'export GH_TOKEN=%s\n' "$gh_token" > "$tmptok"
-    docker cp "$tmptok" "$cid:$tokenfile" >/dev/null
-    docker exec -u root "$cid" chown "$remote_user" "$tokenfile"
-    docker exec -u root "$cid" chmod 0600 "$tokenfile"
-    rm -f "$tmptok"
-  else
-    # Do not leave a token behind from a previous up.
-    docker exec -u root "$cid" rm -f "$tokenfile" 2>/dev/null || true
+  # Secrets go in a 0600 file of their own rather than into /etc/profile.d,
+  # which has to stay world-readable for login shells to source it. The gh token
+  # rides along as just another entry.
+  #
+  # Nothing is passed with `docker exec -e`: the file is written with `docker
+  # cp` and the editor picks it up because it is started from a login shell, so
+  # no value ever appears in a command line on the VM.
+  local secretfile="$remote_home/.codespace-secrets"
+  local tmpsec
+  tmpsec=$(mktemp)
+  chmod 600 "$tmpsec"
+  [ -n "$gh_token" ] && printf 'export GH_TOKEN=%s\n' "$gh_token" >> "$tmpsec"
+  if [ -n "$secrets_json" ] && [ "$secrets_json" != "{}" ]; then
+    printf '%s' "$secrets_json" \
+      | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"' >> "$tmpsec"
   fi
+  if [ -s "$tmpsec" ]; then
+    docker cp "$tmpsec" "$cid:$secretfile" >/dev/null
+    docker exec -u root "$cid" chown "$remote_user" "$secretfile"
+    docker exec -u root "$cid" chmod 0600 "$secretfile"
+  else
+    # Do not leave secrets behind from a previous up.
+    docker exec -u root "$cid" rm -f "$secretfile" 2>/dev/null || true
+  fi
+  rm -f "$tmpsec"
+  # Superseded by .codespace-secrets; clear it so an old one cannot linger.
+  docker exec -u root "$cid" rm -f "$remote_home/.codespace-token" 2>/dev/null || true
 
   # Commit signing, at the container's system level for the same reason as the
   # identity: it should not depend on having a dotfiles repo. The launcher has
@@ -469,7 +496,7 @@ cmd_up() {
     # Deliberately unexpanded: $HOME has to resolve inside the container at
     # login, not out here.
     # shellcheck disable=SC2016
-    echo '[ -r "$HOME/.codespace-token" ] && . "$HOME/.codespace-token"'
+    echo '[ -r "$HOME/.codespace-secrets" ] && . "$HOME/.codespace-secrets"'
   } > "$envfile"
   docker cp "$envfile" "$cid:/etc/profile.d/codespace.sh" >/dev/null
   docker exec -u root "$cid" chmod 0644 /etc/profile.d/codespace.sh
@@ -503,7 +530,6 @@ cmd_up() {
     note "starting editor on $remote_ws"
     docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
     local -a envargs=(-e "PASSWORD=$(editor_password)")
-    [ -n "$gh_token" ] && envargs+=(-e "GH_TOKEN=$gh_token")
     case "$git_ssh" in
       agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
       keyfile) envargs+=(-e "GIT_SSH_COMMAND=$ssh_cmd") ;;
@@ -607,6 +633,30 @@ cmd_new() {
 # daemon and authorised keys in every image, plus another forwarded port per
 # codespace, to reach something `docker exec` already reaches through the SSH
 # session you are sitting in.
+# Your own secrets, the way Codespaces secrets work: KEY=value lines in
+# /persist/codespace/secrets, plus optional per-codespace overrides in
+# /persist/codespace/<name>/secrets. Emitted as JSON for --secrets-file.
+#
+# Parsed with jq, never sourced. This is user data, and sourcing it would run
+# whatever happens to be in the file as shell.
+collect_secrets() {
+  local name="$1" f
+  for f in "$STATE/secrets" "$STATE/$name/secrets"; do
+    [ -r "$f" ] || continue
+    # A secret readable by anyone on the VM is not much of a secret.
+    case "$(stat -c %a "$f")" in
+      600|400) ;;
+      *) note "warning: $f is mode $(stat -c %a "$f"); chmod 600 it" ;;
+    esac
+    cat "$f"
+  done | jq -R -s '
+    split("\n")
+    | map(select(test("^[A-Za-z_][A-Za-z0-9_]*=")))
+    | map(capture("^(?<key>[A-Za-z_][A-Za-z0-9_]*)=(?<value>.*)$"))
+    | from_entries
+  '
+}
+
 # Point the container's apt at a nearer Ubuntu mirror. Opt-in via APT_MIRROR in
 # the launcher config, because the right mirror depends entirely on where you
 # are.

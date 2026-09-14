@@ -252,6 +252,43 @@ git clone https://github.com/someone/refs /persist/repos/refs-upstream
 codespace up refs-upstream
 ```
 
+### Secrets
+
+The equivalent of Codespaces secrets. `KEY=value` lines, one per line, in
+`/persist/codespace/secrets`:
+
+```bash
+install -m 600 /dev/null /persist/codespace/secrets
+cat >> /persist/codespace/secrets <<'EOF'
+NPM_TOKEN=npm_xxxxxxxx
+API_TOKEN=some value with spaces
+EOF
+```
+
+Per-codespace overrides go in `/persist/codespace/<name>/secrets` and win over
+the global file. `codespace up` warns if either is readable by anyone but you.
+
+They arrive in two places, because one is not enough:
+
+- **At create time**, via the CLI's `--secrets-file`, so they reach
+  `postCreateCommand` and the dotfiles `install.sh`. That is where a Codespaces
+  secret like `$SSH_ANIMMOZ_KEY` is expected — so the same dotfiles work here.
+- **In every shell afterwards**, from `~/.codespace-secrets` inside the
+  container (mode `0600`, owned by the container user), sourced by
+  `/etc/profile.d/codespace.sh`. The `--secrets-file` values do **not** persist
+  past the commands that run during `up`, which is why both are needed.
+
+The editor's terminals get them because code-server is started from a login
+shell. Nothing is passed with `docker exec -e` and nothing secret is written
+into the world-readable `profile.d`, so no value appears in a command line on
+the VM.
+
+Values are read at `up` time — edit the file, then `codespace up <name>` again.
+Remove a secret and the next `up` clears it from the container.
+
+> The file is parsed, never sourced, so a stray backtick in a value is just a
+> character. Keep it to `KEY=value`; there is no quoting or interpolation.
+
 ### A faster apt mirror
 
 Containers apt-install from `archive.ubuntu.com` by default, which may be a long
@@ -553,7 +590,7 @@ It is used **only while the repo has no config of its own**. Commit a real
 /persist/ssh/            SSH host keys — machine identity, not yours
 /persist/home/dev/       the dev user's home (/home/dev symlinks here)
 /persist/docker/         images, volumes, containers
-/persist/codespace/      per-codespace port + config, launcher config
+/persist/codespace/      per-codespace port + config, launcher config, secrets
 /persist/code-server/    hub editor password, extensions, state
 /persist/secrets/        anything else, mode 0700
 ```
