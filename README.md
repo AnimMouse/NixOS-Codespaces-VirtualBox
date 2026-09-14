@@ -481,10 +481,26 @@ Two layers, deliberately separate.
 config, `gh`, bash aliases, tmux, direnv. Applied by `nixos-rebuild switch`.
 
 **Container layer** — a separate repo of plain bash, the same mechanism real
-Codespaces uses, so one repo works in both places. Your identity does *not*
-depend on it: the launcher wires `/persist/git/identity` into the container's
-system git config directly, so a codespace with no dotfiles still commits as
-you. The dotfiles repo includes the same file, which is a harmless duplicate. It finds its signing key in
+Codespaces uses, so one repo works in both places.
+
+**Nothing here depends on it.** The launcher writes the whole git story into the
+container's *system* config: identity, signing, `allowed_signers`, and the
+https→ssh rewrite. A codespace with no dotfiles at all still commits as you and
+still signs. The dotfiles set the same things at the global level, which is a
+harmless duplicate.
+
+| | Set by |
+|---|---|
+| name and email | launcher (and dotfiles) |
+| `gpg.format`, `user.signingkey`, `commit.gpgsign` | launcher (and dotfiles) |
+| `allowed_signers`, `url.insteadOf` | launcher (and dotfiles) |
+| `GIT_SSH_COMMAND`, `SSH_AUTH_SOCK`, `GH_TOKEN` | launcher only |
+| shell, aliases, editor preferences | dotfiles only |
+| key material in **real Codespaces** (`$SSH_ANIMMOZ_KEY`) | dotfiles only |
+
+So the dotfiles are now your *portable preferences* layer, not the thing that
+makes git work here. They still do the whole job in real Codespaces, where
+there is no launcher. It finds its signing key in
 this order:
 
 1. `/mnt/git-ssh/id_ed25519` — this VM's mount; used in place

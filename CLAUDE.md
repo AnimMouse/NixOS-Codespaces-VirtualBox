@@ -171,6 +171,15 @@ the same repo works here, in real Codespaces, and in any random container.
 
 `install.sh` runs on every container create — keep it fast and idempotent.
 
+**The container layer must stay optional here.** Anything needed for git to work
+correctly — identity, signing, allowed_signers, the https→ssh rewrite — is
+written by the launcher into the container's *system* git config, because the
+launcher already knows which credential mode it chose and should not make
+something downstream re-derive it and risk disagreeing. The dotfiles repo sets
+the same things at the global level for the benefit of real Codespaces, where
+no launcher exists. A codespace started with no `DOTFILES_REPOSITORY` must still
+commit as you, and still sign.
+
 Do not commit dot-prefixed files at the repo root alongside an install script;
 some tooling auto-copies them without overwriting defaults, producing confusing
 shell breakage. Store them undotted and symlink from `install.sh`.

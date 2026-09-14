@@ -292,6 +292,8 @@ cmd_up() {
     # VM does. Not secret, and the same file either way.
     [ -r /persist/git/identity ] && \
       args+=(--mount "type=bind,source=/persist/git/identity,target=/mnt/git-ssh/identity")
+    [ -r /persist/git/allowed_signers ] && \
+      args+=(--mount "type=bind,source=/persist/git/allowed_signers,target=/mnt/git-ssh/allowed_signers")
     if [ -r /persist/git/known_hosts ]; then
       args+=(--mount "type=bind,source=/persist/git/known_hosts,target=/mnt/git-ssh/known_hosts")
       have_known_hosts=1
@@ -408,6 +410,29 @@ cmd_up() {
   else
     # Do not leave a token behind from a previous up.
     docker exec -u root "$cid" rm -f "$tokenfile" 2>/dev/null || true
+  fi
+
+  # Commit signing, at the container's system level for the same reason as the
+  # identity: it should not depend on having a dotfiles repo. The launcher has
+  # already worked out whether a usable key is reachable and how, so it writes
+  # the answer rather than making something downstream re-derive it and risk
+  # disagreeing.
+  #
+  # user.signingkey is the *public* half: `ssh-keygen -Y sign` uses the agent
+  # when the private half is unreadable, which is the whole point of agent mode.
+  if [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; then
+    docker exec -u root "$cid" sh -c '
+      set -e
+      git config --system gpg.format ssh
+      git config --system user.signingkey /mnt/git-ssh/id_ed25519.pub
+      git config --system commit.gpgsign true
+      git config --system tag.gpgsign true
+      [ -r /mnt/git-ssh/allowed_signers ]         && git config --system gpg.ssh.allowedSignersFile /mnt/git-ssh/allowed_signers
+      # With a key available, reach GitHub over SSH even for https remotes, so a
+      # repo cloned over https can still be pushed.
+      git config --system --replace-all url."git@github.com:".insteadOf https://github.com/
+      exit 0
+    ' 2>/dev/null || note "note: could not set container git signing config"
   fi
 
   # Wire the identity in at the container's *system* level, so `git commit`
