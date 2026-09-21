@@ -28,7 +28,8 @@ Four parts. Part 1 is a one-off; parts 2–4 take about ten minutes.
 ## 1. Install the VM
 
 Full walkthrough, including every VirtualBox setting:
-**[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)**. The shape of it:
+**[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)**. Working on the flake itself rather
+than using it? **[HANDOFF.md](HANDOFF.md)**. The shape of it:
 
 | | |
 |---|---|
@@ -691,6 +692,22 @@ install script runs after every `up`), and stopping a container at all.
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |
 | No Pylance / no official C/C++ extension | code-server uses Open VSX. Pick equivalents in `devcontainer.json` `customizations` |
 | A codespace vanished after a week | `docker system prune` deletes stopped containers; the timer is filtered to `until=168h`. `codespace up` rebuilds it |
+
+## Working on this repo
+
+The flake checkout at `/persist/dev-vm` is itself a codespace:
+
+```bash
+codespace up /persist/dev-vm      # first time; afterwards: codespace up dev-vm
+```
+
+`.devcontainer/devcontainer.json` pulls in the official Nix feature, so the
+container gets the toolchain and the VM keeps only what NixOS needs. The store
+sits on a named volume so recreating the container does not re-download
+nixpkgs. The workspace is the checkout the system rebuilds from, so verify in
+the container and then `rebuild` on the VM — no push-and-pull round trip.
+
+The container cannot apply: `nixos-rebuild switch` needs root on the VM.
 
 ## Checking a change without a VM
 

@@ -1,0 +1,40 @@
+{
+  "name": "dev-vm",
+
+  // Plain Ubuntu: the toolchain comes from Nix, not from the image.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  "features": {
+    // Single-user install. A container has no systemd, so the multi-user
+    // daemon has nothing to run under.
+    "ghcr.io/devcontainers/features/nix:1": {
+      "multiUser": false,
+      "extraNixConfig": "experimental-features = nix-command flakes\nsandbox = false"
+    }
+  },
+
+  // The Nix store on a named volume, so recreating the container does not mean
+  // re-downloading nixpkgs and the whole closure. Docker seeds an empty volume
+  // from the image, so the feature's install survives the first mount; after
+  // that the volume wins. Evaluating this flake is ~40s cold and ~10s warm.
+  //
+  // Delete the volume (`docker volume rm dev-vm-nix-store`) if you ever want a
+  // genuinely clean store — an image rebuild alone will not replace it.
+  "mounts": [
+    "source=dev-vm-nix-store,target=/nix,type=volume"
+  ],
+
+  "customizations": {
+    "vscode": {
+      // Open VSX has nix-ide; the Microsoft marketplace is not reachable from
+      // code-server.
+      "extensions": ["jnoortheen.nix-ide"],
+      "settings": {
+        "nix.enableLanguageServer": true,
+        "nix.serverPath": "nil"
+      }
+    }
+  },
+
+  "postCreateCommand": "nix --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
+}
