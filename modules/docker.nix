@@ -16,9 +16,15 @@
       dates = "weekly";
       # `docker system prune -f` on its own also deletes *stopped* containers,
       # and `codespace down` stops rather than removes them — so an untuned
-      # prune would silently discard a codespace a week after you last used it.
-      # The filter keeps anything touched in the last seven days.
-      flags = [ "--filter" "until=168h" ];
+      # prune silently discards a codespace that is merely idle.
+      #
+      # `until` does not prevent that: it matches on container *creation* time,
+      # not last use, so one created a month ago and stopped last night is
+      # still older than 168h and still goes. The label is the real guard —
+      # every codespace container carries `codespace=<name>` from the
+      # launcher's --id-label, and `codespace rm` is the only path that should
+      # remove one. `until` stays, to bound dangling images and networks.
+      flags = [ "--filter" "until=168h" "--filter" "label!=codespace" ];
     };
   };
 
