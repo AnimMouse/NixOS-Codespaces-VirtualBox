@@ -8,6 +8,7 @@
 #   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
 #   codespace list                 what exists, on which port
 #   codespace logs <name>          editor log, for when the URL does not answer
+#   codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
 #
 # No shebang: this is built by modules/codespace.nix with
 # pkgs.writeShellApplication, which supplies one and runs shellcheck.
@@ -22,6 +23,10 @@ REFS_NAME=refs
 STATE=/persist/codespace
 PW_FILE=/persist/code-server/pw
 EDITOR_PORT=8080
+# Real Codespaces deletes a codespace after 30 days of inactivity. Same default
+# here, overridable from $STATE/config; 0 disables the sweep entirely. Only the
+# *container* goes — see cmd_gc.
+RETENTION_DAYS_DEFAULT=30
 
 die() { echo "codespace: $*" >&2; exit 1; }
 # Progress goes to stderr so that functions which echo a result can be used in
@@ -39,6 +44,7 @@ usage:
   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
   codespace list                 what exists, on which port
   codespace logs <name>          editor log, for when the URL does not answer
+  codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
 USAGE
   exit "${1:-1}"
 }
@@ -142,6 +148,47 @@ allocate_port() {
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
 container_any() { docker ps -aq --filter "label=codespace=$1" | head -1; }
 
+load_config() {
+  if [ -r "$STATE/config" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE/config"
+  fi
+}
+
+# "I used this" — the clock the retention sweep runs on. Recorded explicitly
+# rather than inferred, because the obvious sources are both wrong: docker's
+# .Created is when the container was built, and .State.FinishedAt is bumped by
+# the VM shutting down, so a machine rebooted weekly would age nothing, ever.
+touch_used() { mkdir -p "$STATE/$1" && : > "$STATE/$1/last_used"; }
+
+# Falls back for codespaces that predate the marker: the last stop is a decent
+# guess, and the state directory's own mtime is the floor. Never returns empty,
+# so arithmetic on it cannot blow up under `set -u`.
+last_used_epoch() {
+  local name="$1" cid ts
+  if [ -f "$STATE/$name/last_used" ]; then
+    stat -c %Y "$STATE/$name/last_used"
+    return
+  fi
+  cid=$(container_any "$name")
+  if [ -n "$cid" ]; then
+    ts=$(docker inspect -f '{{.State.FinishedAt}}' "$cid" 2>/dev/null || true)
+    # Docker reports a zero time for a container that has never been stopped.
+    case "$ts" in
+      "" | 0001-01-01*) ;;
+      *) date -d "$ts" +%s 2>/dev/null && return ;;
+    esac
+  fi
+  stat -c %Y "$STATE/$name" 2>/dev/null || echo 0
+}
+
+idle_days() {
+  local used now
+  used=$(last_used_epoch "$1")
+  now=$(date +%s)
+  echo $(( (now - used) / 86400 ))
+}
+
 editor_password() {
   [ -r "$PW_FILE" ] || die "$PW_FILE missing — is the code-server module active?"
   cat "$PW_FILE"
@@ -162,10 +209,7 @@ cmd_up() {
   echo "$ws" > "$STATE/$name/workspace"
 
   # Read before anything that might consult DEFAULT_IMAGE or DOTFILES_*.
-  if [ -r "$STATE/config" ]; then
-    # shellcheck source=/dev/null
-    . "$STATE/config"
-  fi
+  load_config
 
   local -a args=(
     up
@@ -368,6 +412,7 @@ cmd_up() {
   # right directory without paying for another `devcontainer up`.
   echo "$remote_user" > "$STATE/$name/remote_user"
   echo "$remote_ws" > "$STATE/$name/remote_workspace"
+  touch_used "$name"
 
   # What the container actually has, not what the host happened to offer. `up`
   # reuses an existing container and silently ignores changed --mount flags, so
@@ -734,6 +779,7 @@ cmd_shell() {
 
   cid=$(container_of "$name")
   [ -n "$cid" ] || die "$name is not running — 'codespace up $name' first"
+  touch_used "$name"
 
   # From state where `up` left it; otherwise dug back out of the container, so
   # this still works for one created before that was recorded.
@@ -807,19 +853,73 @@ cmd_rm() {
 }
 
 cmd_list() {
-  local dir name port cid status
-  printf '%-24s %-6s %-10s %s\n' NAME PORT STATE URL
+  local dir name port cid status idle
+  printf '%-22s %-6s %-8s %-6s %s\n' NAME PORT STATE IDLE URL
   for dir in "$STATE"/*/; do
     [ -d "$dir" ] || continue
     name=$(basename "$dir")
     [ -f "$dir/port" ] || continue
     port=$(cat "$dir/port")
     cid=$(container_of "$name")
-    if [ -n "$cid" ]; then status=running
-    elif [ -n "$(container_any "$name")" ]; then status=stopped
-    else status=absent; fi
-    printf '%-24s %-6s %-10s %s\n' "$name" "$port" "$status" "http://localhost:$port/"
+    # IDLE is what the retention sweep is counting, so it is only meaningful
+    # for the state the sweep looks at. A running codespace is never a
+    # candidate, and an absent one has nothing left to reclaim.
+    if [ -n "$cid" ]; then status=running; idle="-"
+    elif [ -n "$(container_any "$name")" ]; then
+      status=stopped; idle="$(idle_days "$name")d"
+    else status=absent; idle="-"; fi
+    printf '%-22s %-6s %-8s %-6s %s\n' "$name" "$port" "$status" "$idle" "http://localhost:$port/"
   done
+}
+
+# The Codespaces retention behaviour, on a real last-used clock. Deliberately
+# narrower than the real thing: GitHub deletes the whole codespace, workspace
+# and all, and that is its most resented behaviour. Here only the container
+# goes. The checkout in $REPOS, the port reservation and any generated
+# devcontainer.json stay, so `codespace up <name>` brings it back on the same
+# URL — what is lost is the container layer, the same thing `codespace rebuild`
+# discards. Deleting a checkout stays a thing you ask for, via `rm --repo`.
+cmd_gc() {
+  local dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n | --dry-run) dry=1; shift ;;
+      *) usage ;;
+    esac
+  done
+
+  load_config
+  local days="${RETENTION_DAYS:-$RETENTION_DAYS_DEFAULT}"
+  case "$days" in
+    '' | *[!0-9]*) die "RETENTION_DAYS must be a whole number of days, got '$days'" ;;
+  esac
+  if [ "$days" -eq 0 ]; then
+    note "RETENTION_DAYS=0 — retention is off, nothing to sweep"
+    return 0
+  fi
+
+  local dir name cid idle swept=0
+  for dir in "$STATE"/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    cid=$(container_any "$name")
+    # Nothing to reclaim, or still running — a codespace you left up is in use
+    # by definition, however long ago you last typed in it.
+    [ -n "$cid" ] || continue
+    [ -z "$(container_of "$name")" ] || continue
+
+    idle=$(idle_days "$name")
+    [ "$idle" -ge "$days" ] || continue
+
+    if [ "$dry" = 1 ]; then
+      note "would remove $name (idle ${idle}d >= ${days}d)"
+    else
+      note "removing container for $name (idle ${idle}d >= ${days}d); checkout kept"
+      docker rm "$cid" >/dev/null || note "could not remove the container for $name"
+    fi
+    swept=$(( swept + 1 ))
+  done
+  [ "$swept" -gt 0 ] || note "nothing idle past ${days}d"
 }
 
 cmd_logs() {
@@ -844,6 +944,7 @@ case "$sub" in
   rm|delete) cmd_rm "$@" ;;
   list|ls) cmd_list "$@" ;;
   logs)  cmd_logs "$@" ;;
+  gc)    cmd_gc "$@" ;;
   -h|--help|help) usage 0 ;;
-  *)     die "unknown command '$sub' (try: up, new, shell, rebuild, down, rm, list, logs)" ;;
+  *)     die "unknown command '$sub' (try: up, new, shell, rebuild, down, rm, list, logs, gc)" ;;
 esac

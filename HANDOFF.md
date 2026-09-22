@@ -156,7 +156,7 @@ typo and watching `SC2154` stop it.
 /persist/codespace/
   config                         launcher settings (below)
   secrets                        KEY=value, mode 0600
-  <name>/                        port, generated devcontainer.json, secrets
+  <name>/                        port, generated devcontainer.json, secrets, last_used
 /persist/code-server/pw          hub editor password, generated on first boot
 /persist/ssh/                    SSH *host* keys — the machine's identity
 /persist/secrets/                spare 0700 dir, root-owned (sudo to use it)
@@ -175,6 +175,7 @@ typo and watching `SC2154` stop it.
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers |
+| `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
 
 ---
 
@@ -190,12 +191,20 @@ codespace shell <name>          # a terminal inside it, in a tmux on the VM
 codespace rebuild <name>        # recreate the container, keep the port
 codespace down <name>           # stop it
 codespace rm <name> [--repo]    # delete it; --repo drops the checkout
-codespace list
+codespace list                  # + IDLE, the clock gc is counting
 codespace logs <name>
+codespace gc [--dry-run]        # what the daily timer runs; --dry-run to preview
 ```
 
 After a VM reboot: `ssh-auth`, then `codespace up <name>` for each one you want
 back. Containers do not auto-start, and the editor proxy is not enabled at boot.
+
+A codespace idle longer than `RETENTION_DAYS` (default 30) loses its *container*
+to the daily `codespace-gc.timer` — never its checkout, its port, or its URL.
+`codespace up <name>` rebuilds it in place. Anything that lived only in the
+container layer (`$HOME`, hand-installed tooling) goes, exactly as it does on
+`codespace rebuild`. A codespace left *running* is never touched, however long
+since you last typed in it.
 
 ---
 

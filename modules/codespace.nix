@@ -58,6 +58,42 @@ in
     };
   };
 
+  # Retention, the way real Codespaces does it: a container left idle past
+  # RETENTION_DAYS (default 30, from /persist/codespace/config) is removed.
+  #
+  # This lives here rather than in Docker's autoPrune because autoPrune cannot
+  # express it. Its only filter, `until`, matches container *creation* time, so
+  # it would reap a codespace you use daily simply for having existed a month —
+  # which is exactly what it was doing. modules/docker.nix now exempts anything
+  # labelled `codespace` from the prune, and the clock lives here instead.
+  systemd.services.codespace-gc = {
+    description = "Remove dev containers idle past the retention window";
+    after = [ "docker.service" ];
+    requires = [ "docker.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      # Not root. `dev` is in the docker group and owns /persist/codespace, so
+      # the sweep needs nothing the launcher does not already have — and a
+      # mistake in it can reach no further than the launcher could.
+      User = "dev";
+      ExecStart = "${lib.getExe codespace} gc";
+    };
+  };
+
+  systemd.timers.codespace-gc = {
+    description = "Daily codespace retention sweep";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "daily";
+      # The VM is not up around the clock, so without this a sweep due while it
+      # was off is simply skipped and containers age indefinitely.
+      Persistent = true;
+      # Nothing races this, but it keeps the sweep off the same instant as
+      # every other daily unit on a machine with one disk.
+      RandomizedDelaySec = "15m";
+    };
+  };
+
   systemd.tmpfiles.rules = [
     "d /persist/codespace 0755 dev users -"
     # Reference checkouts, mounted into every container at /workspaces/refs.
