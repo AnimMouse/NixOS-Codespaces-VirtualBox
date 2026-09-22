@@ -5,7 +5,7 @@
 #   codespace rebuild <name>       recreate the container, keeping the port
 #   codespace shell <name>         a terminal inside it, in a tmux on the VM
 #   codespace down <name>          stop it (the CLI has no `down` of its own)
-#   codespace rm <name> [--repo]   delete the container; --repo drops the checkout
+#   codespace rm <name> [opts]     delete it; --repo drops the checkout, --volume its volumes
 #   codespace list                 what exists, on which port
 #   codespace logs <name>          editor log, for when the URL does not answer
 #   codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
@@ -41,7 +41,7 @@ usage:
   codespace rebuild <name|path>  recreate it from scratch, keeping the port
   codespace shell <name>         a terminal inside it, in a tmux on the VM
   codespace down <name>          stop it, keeping the container
-  codespace rm <name> [--repo]   delete the container; --repo drops the checkout
+  codespace rm <name> [opts]     delete it; --repo drops the checkout, --volume its volumes
   codespace list                 what exists, on which port
   codespace logs <name>          editor log, for when the URL does not answer
   codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
@@ -825,18 +825,60 @@ cmd_shell() {
 
 cmd_rm() {
   [ $# -ge 1 ] || usage
-  local name cid keep_repo=1
-  name=$(slugify "$1")
-  [ "${2:-}" = "--repo" ] && keep_repo=0
+  local name cid keep_repo=1 drop_volumes=0
+  name=$(slugify "$1"); shift
+
+  # A loop rather than a test on $2: the flags combine, and the old positional
+  # check silently ignored anything after the first one.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) keep_repo=0; shift ;;
+      --volume | --volumes) drop_volumes=1; shift ;;
+      *) die "unknown option '$1' for rm (try --repo, --volume)" ;;
+    esac
+  done
 
   warn_ephemeral "$name"
   sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
 
   cid=$(container_any "$name")
+
+  # Read while the container still exists: its mount list is the only record of
+  # which volumes were its own, and `docker rm` takes it with it.
+  local -a vols=()
+  local v
+  if [ "$drop_volumes" = 1 ]; then
+    if [ -n "$cid" ]; then
+      while IFS= read -r v; do
+        [ -n "$v" ] && vols+=("$v")
+      done < <(docker inspect "$cid" \
+        | jq -r '.[0].Mounts[]? | select(.Type == "volume") | .Name' 2>/dev/null || true)
+    else
+      note "no container for $name — nothing left to say which volumes were its"
+    fi
+  fi
+
   if [ -n "$cid" ]; then
     note "removing container for $name"
     docker rm -f "$cid" >/dev/null
   fi
+
+  # Only after the container is gone: docker refuses to remove a volume any
+  # container still references, stopped ones included.
+  #
+  # Every attached volume is offered, not just the ones named after this
+  # codespace, because the mount list is the only honest answer to "which were
+  # its". That includes deliberately shared ones — dev-vm-nix-store holds the
+  # nixpkgs closure and is expensive to refill — so each outcome is reported by
+  # name. A volume another codespace is still using survives on docker's own
+  # refusal, which is the check worth trusting here.
+  for v in ${vols[@]+"${vols[@]}"}; do
+    if docker volume rm "$v" >/dev/null 2>&1; then
+      note "removed volume $v"
+    else
+      note "kept volume $v — another container still references it"
+    fi
+  done
 
   # Drops the port reservation and any generated devcontainer.json, so the next
   # `up` starts clean. The checkout is left alone unless asked: it is the one

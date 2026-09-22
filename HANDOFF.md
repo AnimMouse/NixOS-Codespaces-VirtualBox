@@ -190,7 +190,7 @@ codespace new <name>            # the same, on an empty workspace
 codespace shell <name>          # a terminal inside it, in a tmux on the VM
 codespace rebuild <name>        # recreate the container, keep the port
 codespace down <name>           # stop it
-codespace rm <name> [--repo]    # delete it; --repo drops the checkout
+codespace rm <name> [opts]      # --repo drops the checkout, --volume its volumes
 codespace list                  # + IDLE, the clock gc is counting
 codespace logs <name>
 codespace gc [--dry-run]        # what the daily timer runs; --dry-run to preview
@@ -230,6 +230,10 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
   uses `${devcontainerId}` so copying the file cannot collide; the Nix store
   volume keeps a fixed name on purpose, because sharing that closure is the
   point — and it is a cache, so deleting it costs time, not data.
+  `codespace rm <name> --volume` offers every volume the container had and
+  reports each outcome — docker refuses to remove one another container still
+  references, which is the check worth trusting. Bind mounts are never
+  candidates: `docker volume rm` addresses the volume namespace, not paths.
 - **`/workspaces` is not `/persist`.** Only `/workspaces/<name>` and
   `/workspaces/refs` are mounts. Anything else there, and all of `$HOME`, dies
   with the container. `rebuild` and `rm` warn before discarding.
