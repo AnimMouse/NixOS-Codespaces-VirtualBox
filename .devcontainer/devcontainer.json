@@ -37,8 +37,25 @@
   //
   // Delete the volume (`docker volume rm dev-vm-nix-store`) if you ever want a
   // genuinely clean store — an image rebuild alone will not replace it.
+  //
+  // Claude Code's state — credentials, settings, session history, memory —
+  // otherwise lives in the container layer and dies with every `codespace
+  // rebuild`, which means logging in again and losing anything remembered.
+  //
+  // A volume rather than a bind mount of /persist, for two reasons. It is what
+  // works in a real Codespace (bind mounts are ignored there, volume mounts are
+  // not), and Docker's data-root is already /persist/docker, so the volume is
+  // on /persist anyway — §3's "everything precious lives in /persist" holds.
+  // The cost is that it is not browsable from the VM the way /persist/git is;
+  // it is under /persist/docker/volumes/dev-vm-claude/_data.
+  //
+  // Unlike /nix, this path does not exist in the image, so Docker creates the
+  // mount point root-owned rather than seeding it — hence the chown in
+  // postCreateCommand, without which Claude Code cannot write to its own
+  // directory. /home/vscode is hardcoded because the image pins that user.
   "mounts": [
-    "source=dev-vm-nix-store,target=/nix,type=volume"
+    "source=dev-vm-nix-store,target=/nix,type=volume",
+    "source=dev-vm-claude,target=/home/vscode/.claude,type=volume"
   ],
 
   "customizations": {
@@ -70,5 +87,8 @@
   //
   // `add` not `install`: the latter is a deprecated alias as of nix 2.35. Both
   // are idempotent — a second run warns "already added" and exits 0.
-  "postCreateCommand": "nix profile add nixpkgs/nixos-26.05#nil && nix --version && nil --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
+  //
+  // The chown is for the .claude volume above, and must come first: it is what
+  // makes the directory writable at all. Harmless when already correct.
+  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude && nix profile add nixpkgs/nixos-26.05#nil && nix --version && nil --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
 }
