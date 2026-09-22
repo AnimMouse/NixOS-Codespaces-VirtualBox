@@ -53,9 +53,21 @@
   // mount point root-owned rather than seeding it — hence the chown in
   // postCreateCommand, without which Claude Code cannot write to its own
   // directory. /home/vscode is hardcoded because the image pins that user.
+  //
+  // ${devcontainerId} because Docker's volume namespace is flat and global to
+  // the daemon: a fixed name here means any other repo that copies this file
+  // silently shares one Claude state directory, two containers writing it at
+  // once. The variable is unique per dev container on a host and stable across
+  // rebuilds, so persistence survives while the collision cannot happen. The
+  // cost is a separate login per codespace, which is also what a real
+  // Codespace does.
+  //
+  // The store deliberately does NOT use it. Sharing one nixpkgs closure across
+  // codespaces is the entire point of that mount — `codespace rm --volume`
+  // reports it rather than quietly discarding it.
   "mounts": [
     "source=dev-vm-nix-store,target=/nix,type=volume",
-    "source=dev-vm-claude,target=/home/vscode/.claude,type=volume"
+    "source=claude-${devcontainerId},target=/home/vscode/.claude,type=volume"
   ],
 
   "customizations": {

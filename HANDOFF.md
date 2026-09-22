@@ -224,6 +224,12 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
 
 ## Loose ends
 
+- **Docker's volume namespace is flat and global to the daemon.** Two
+  `devcontainer.json` files naming the same `source=` share one volume, mounted
+  into both containers at once with no coordination. This repo's `.claude` mount
+  uses `${devcontainerId}` so copying the file cannot collide; the Nix store
+  volume keeps a fixed name on purpose, because sharing that closure is the
+  point — and it is a cache, so deleting it costs time, not data.
 - **`/workspaces` is not `/persist`.** Only `/workspaces/<name>` and
   `/workspaces/refs` are mounts. Anything else there, and all of `$HOME`, dies
   with the container. `rebuild` and `rm` warn before discarding.
