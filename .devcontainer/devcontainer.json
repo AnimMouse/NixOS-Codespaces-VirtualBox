@@ -27,14 +27,31 @@
   "customizations": {
     "vscode": {
       // Open VSX has nix-ide; the Microsoft marketplace is not reachable from
-      // code-server.
+      // code-server. This particular extension happens to be published to both,
+      // so it also resolves in a real Codespace — do not assume that of the
+      // next Open VSX pick.
       "extensions": ["jnoortheen.nix-ide"],
       "settings": {
         "nix.enableLanguageServer": true,
+        // Provided by postCreateCommand below. nix-ide ships no server of its
+        // own, so without that install this setting names a binary that is not
+        // there and the language server silently never starts.
         "nix.serverPath": "nil"
       }
     }
   },
 
-  "postCreateCommand": "nix --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
+  // `nil` is the language server the setting above points at. Installed here
+  // rather than added to a devShell because nothing enters a devShell on its
+  // own — the editor's terminals and the extension host would both miss it.
+  //
+  // Pinned to the same channel as flake.nix rather than the bare `nixpkgs#`
+  // registry alias, which resolves to unstable (CLAUDE.md §10). It is the
+  // channel, not flake.lock's exact revision, so this may differ by a few
+  // commits from what the flake evaluates against — which costs an extra
+  // nixpkgs fetch at create time and matters not at all for a language server.
+  //
+  // `add` not `install`: the latter is a deprecated alias as of nix 2.35. Both
+  // are idempotent — a second run warns "already added" and exits 0.
+  "postCreateCommand": "nix profile add nixpkgs/nixos-26.05#nil && nix --version && nil --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
 }
