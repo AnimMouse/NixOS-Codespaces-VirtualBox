@@ -247,7 +247,7 @@ cmd_up() {
 
   if [ "$mode" = agent ] || { [ "$mode" = auto ] && [ "$have_agent" = 1 ]; }; then
     if [ "$have_agent" != 1 ]; then
-      die "GIT_SSH_MODE=agent, but no ssh-agent is holding a key. Run: ssh-add $key"
+      die "GIT_SSH_MODE=agent, but no ssh-agent is holding a key. Run: ssh-add $key or ssh-auth"
     fi
     # A passphrase-protected key works without anything to prompt at, and the
     # crypto happens back on the VM.
