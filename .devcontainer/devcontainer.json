@@ -10,7 +10,24 @@
     "ghcr.io/devcontainers/features/nix:1": {
       "multiUser": false,
       "extraNixConfig": "experimental-features = nix-command flakes\nsandbox = false"
-    }
+    },
+
+    // Explicit, though claude-code only declares `installsAfter` on it rather
+    // than a hard dependency. Without it that feature falls back to installing
+    // Node 18 from NodeSource itself — its own failure message recommends
+    // adding this line. This way the version is the feature's LTS, not 18.
+    "ghcr.io/devcontainers/features/node:1": {},
+
+    // Not a `devcontainers/*` feature, so it was checked rather than assumed
+    // (§8: devcontainers-extra, -contrib, -community and itsmechlark all
+    // return no manifest on ghcr). This one resolves: anthropics/…/claude-code
+    // answers 200 at both `1` and `1.0`, currently 1.0.5. It takes no options.
+    //
+    // It also pulls in the `anthropic.claude-code` editor extension by itself,
+    // via its own customizations. That one is on Open VSX as well as the
+    // Microsoft marketplace, so it installs under code-server too — checked,
+    // because §8's marketplace split is exactly where this would have failed.
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
   },
 
   // The Nix store on a named volume, so recreating the container does not mean
