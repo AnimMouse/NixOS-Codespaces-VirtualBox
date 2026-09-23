@@ -156,6 +156,8 @@ typo and watching `SC2154` stop it.
 /persist/codespace/
   config                         launcher settings (below)
   secrets                        KEY=value, mode 0600
+  cache/                         shared download cache, bind-mounted in every
+                                 container — the code-server tarball, once
   <name>/                        port, generated devcontainer.json, secrets, last_used
 /persist/code-server/pw          hub editor password, generated on first boot
 /persist/ssh/                    SSH *host* keys — the machine's identity

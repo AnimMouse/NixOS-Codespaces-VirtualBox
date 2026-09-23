@@ -101,6 +101,11 @@ in
     # next to your project for reference just works; here only the project is a
     # mount, so this is the equivalent that survives.
     "d /persist/refs      0755 dev users -"
+    # Shared download cache, bind-mounted into every container. The code-server
+    # installer caches into $HOME/.cache, which is container layer, so each new
+    # codespace re-fetched the same ~200 MB tarball. Not state: deleting it
+    # costs one download.
+    "d /persist/codespace/cache 0755 dev users -"
     # Optional: a git identity for containers to push with, when no ssh agent
     # is being forwarded. Holds only that key — never the host keys in
     # /persist/ssh, which are root-owned and useless for git anyway.

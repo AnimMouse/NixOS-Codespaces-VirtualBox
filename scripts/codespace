@@ -21,6 +21,11 @@ REFS=/persist/refs
 # a codespace called the same thing would land on the same path.
 REFS_NAME=refs
 STATE=/persist/codespace
+# Shared download cache, mounted into every container. Exists because the
+# code-server tarball is ~200 MB and its installer caches into $HOME/.cache,
+# which is container layer and so dies on every rebuild. See cmd_up.
+CACHE=/persist/codespace/cache
+CONTAINER_CACHE=/var/cache/codespace
 PW_FILE=/persist/code-server/pw
 EDITOR_PORT=8080
 # Real Codespaces deletes a codespace after 30 days of inactivity. Same default
@@ -368,6 +373,13 @@ cmd_up() {
     args+=(--mount "type=bind,source=$REFS,target=/workspaces/$REFS_NAME")
   fi
 
+  # Shared across every codespace on purpose: one download of the code-server
+  # tarball serves all of them, now and after any rebuild. A bind rather than a
+  # volume so it is browsable and prunable from the VM with plain `rm`, and
+  # because nothing here is state — worst case it re-downloads.
+  mkdir -p "$CACHE"
+  args+=(--mount "type=bind,source=$CACHE,target=$CONTAINER_CACHE")
+
   # The dotfiles clone runs *inside* the container, before anything this script
   # writes there exists — so a private dotfiles repo over https fails with
   # "could not read Username", and `up` still reports success, leaving the
@@ -437,9 +449,22 @@ cmd_up() {
   # project's devcontainer.json untouched so it stays portable to real
   # Codespaces. `--method standalone` avoids apt, so this works on any glibc
   # base image. Recreating the container discards it, hence the check.
+  #
+  # XDG_CACHE_HOME redirects the installer's own download cache onto the shared
+  # bind mount. Its fetch() reuses an already-downloaded tarball, but it caches
+  # under $HOME/.cache by default — container layer, so every new codespace
+  # re-fetched the same ~200 MB release. Pointed at /persist it downloads once
+  # per version, ever, and later containers only untar.
+  #
+  # `sudo env VAR=…` rather than `sudo VAR=…` because the bare form depends on
+  # the container's sudoers policy: sudo accepts a command-line assignment only
+  # for variables absent from env_delete, or with `setenv` granted. It does
+  # work under the devcontainers default (checked), but base images are not
+  # ours to assume. Through `env` the assignment is an argument to a command,
+  # so no env policy applies.
   note "ensuring code-server is installed"
   docker exec -u "$remote_user" "$cid" bash -lc \
-    'command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo sh -s -- --method standalone --prefix /usr/local' \
+    "command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo env XDG_CACHE_HOME=$CONTAINER_CACHE sh -s -- --method standalone --prefix /usr/local" \
     || die "could not install code-server in the container"
 
   # Real Codespaces injects GITHUB_TOKEN so `gh` works inside the container
