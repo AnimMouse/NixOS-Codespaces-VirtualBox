@@ -179,6 +179,7 @@ typo and watching `SC2154` stop it.
 | `APT_MIRROR` | — | rewrite apt sources in containers |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
 | `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Takes effect on `codespace rebuild` |
+| `TIMEZONE` | the VM's own | zone for every container, e.g. `Asia/Manila`. On `/persist` so it need not be committed — see below |
 
 ---
 
@@ -227,6 +228,14 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
 
 ## Loose ends
 
+- **Timezone lives in two places, and only one of them is committed.** The VM's
+  is `time.timeZone` in `hosts/dev/configuration.nix`, currently `UTC`.
+  Containers take `TIMEZONE` from the launcher config, falling back to the VM's
+  own zone, so by default there is one answer rather than two that drift.
+  Setting it on `/persist` alone keeps roughly-where-you-live out of a public
+  repo while still giving every container the right clock; set both if you want
+  the VM to match. Applied as `/etc/localtime` plus `TZ` in the container, and
+  never fatal — an image with no tzdata just stays on UTC and says so.
 - **Docker's volume namespace is flat and global to the daemon.** Two
   `devcontainer.json` files naming the same `source=` share one volume, mounted
   into both containers at once with no coordination. This repo's `.claude` mount

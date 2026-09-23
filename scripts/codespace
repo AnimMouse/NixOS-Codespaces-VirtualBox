@@ -568,12 +568,56 @@ cmd_up() {
 
   [ -n "${APT_MIRROR:-}" ] && apply_apt_mirror "$cid" "$APT_MIRROR"
 
+  # Containers come up on UTC, so `date`, log timestamps and the editor's own
+  # clock all disagree with the machine you are sitting at.
+  #
+  # TIMEZONE in the launcher config wins; unset, the container inherits the
+  # VM's own zone, so there is one answer rather than two that can drift. On
+  # /persist rather than in configuration.nix on purpose: `time.timeZone` is
+  # committed to a public repo, and roughly where you live is the kind of thing
+  # this repo keeps off GitHub. Set both if you want the VM to match.
+  local tz="${TIMEZONE:-}"
+  if [ -z "$tz" ]; then
+    # From the link target, not /etc/timezone: NixOS does not write that file,
+    # and points /etc/localtime into the store.
+    tz=$(readlink -f /etc/localtime 2>/dev/null || true)
+    case "$tz" in
+      */zoneinfo/*) tz="${tz##*/zoneinfo/}" ;;
+      *) tz="" ;;
+    esac
+  fi
+  if [ -n "$tz" ]; then
+    # Validated, not trusted: it is interpolated into a shell command that runs
+    # as root in the container. Zone names are letters, digits, _ + - and /.
+    case "$tz" in
+      *[!0-9A-Za-z_+/-]*) die "TIMEZONE='$tz' is not a zone name — e.g. Asia/Manila" ;;
+    esac
+    local tz_status=0
+    # Never fatal. A container with no tzdata is still a working codespace, and
+    # exit 3 distinguishes that from the command itself going wrong.
+    docker exec -u root "$cid" sh -c "
+      [ -e /usr/share/zoneinfo/$tz ] || exit 3
+      ln -sf /usr/share/zoneinfo/$tz /etc/localtime
+      printf '%s\n' '$tz' > /etc/timezone
+    " 2>/dev/null || tz_status=$?
+    case "$tz_status" in
+      0) note "container timezone $tz" ;;
+      3) note "note: no zoneinfo for $tz in this image — the container stays on UTC" ;;
+      *) note "note: could not set the container timezone (exit $tz_status)" ;;
+    esac
+  fi
+
   # Login shells get the git env too; the editor's own terminals inherit it
   # from the code-server process below.
   local envfile
   envfile=$(mktemp)
   {
     echo "export CODESPACE_NAME=$name"
+    # Belt and braces next to /etc/localtime above: that covers anything going
+    # through libc, TZ covers what reads the variable instead. Only when the
+    # zone actually applied, so a container with no tzdata is not told it is on
+    # a zone it cannot resolve.
+    [ "${tz_status:-1}" = 0 ] && echo "export TZ=$tz"
     case "$git_ssh" in
       agent)
         echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock'
