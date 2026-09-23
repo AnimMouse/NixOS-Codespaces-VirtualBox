@@ -1,7 +1,7 @@
 # HANDOFF — moving development onto the VM
 
 This repo was built and verified from a **GitHub Codespace**, not from the VM it
-describes. Everything through Phase 3 is done and pushed; Phase 4 is untouched.
+describes. Everything through Phase 3 is done; Phase 4 is untouched.
 This file is what you need to carry on from inside the VM itself.
 
 Read `CLAUDE.md` for the design and the gotcha list — it is the authority and is
@@ -13,7 +13,7 @@ current. This file only covers what *changes* when the workbench moves.
 
 | | |
 |---|---|
-| HEAD at handoff | `bb6607f` — in sync with `origin/main` |
+| HEAD at handoff | `bb6607f` — where things stood when work moved off the Codespace. `git log` for now; `main` is often ahead of `origin` |
 | Phases 1–3 | Done. Installed, booted, and in daily use on the VM |
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
@@ -47,6 +47,27 @@ These were built from documentation and inspection only:
   lingering). Only its no-key / no-agent / already-loaded branches were tested.
 
 If you touch any of these, you can now test them properly rather than by proxy.
+
+### Pending the next container rebuild
+
+Work done from inside the flake's own codespace, which has no Docker socket, so
+none of it has been through a real container create. `codespace rebuild dev-vm`
+is the test for all of it at once. Verified only by `nix build`, shellcheck, and
+stubbed or dry-run harnesses:
+
+- **`${devcontainerId}` expands.** `docker volume ls` should show a `claude-`
+  volume with an id suffix, not a literal `${devcontainerId}`.
+- **`~/.claude` comes up writable.** Docker creates that mount point root-owned
+  because the path is absent from the image — the chown leading
+  `postCreateCommand` is what fixes it.
+- **The tarball cache is used.** Second create onward, `up` should print
+  `+ Reusing …` where the ~200 MB download used to be.
+- **`nil` installs**, so `postCreateCommand` output ends with a version line.
+- **`devcontainer-lock.json`** may be rewritten by the CLI with its own digests
+  for node and claude-code. Commit whatever it produces over the hand-resolved
+  ones.
+- **The first rebuild still loses `~/.claude`** — the volume is created empty,
+  so persistence starts from the rebuild after. Expect one more login.
 
 ### Test scaffolding you no longer need
 
@@ -172,7 +193,7 @@ typo and watching `SC2154` stop it.
 |---|---|---|
 | `DOTFILES_REPOSITORY` | — | passed to `devcontainer up` |
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
-| `DEFAULT_IMAGE` | `devcontainers/base:ubuntu` | for repos with no devcontainer.json |
+| `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu` | for repos with no devcontainer.json |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
