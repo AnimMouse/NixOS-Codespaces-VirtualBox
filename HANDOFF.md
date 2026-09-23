@@ -178,6 +178,7 @@ typo and watching `SC2154` stop it.
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
+| `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Takes effect on `codespace rebuild` |
 
 ---
 

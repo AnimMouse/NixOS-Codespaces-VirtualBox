@@ -462,9 +462,29 @@ cmd_up() {
   # work under the devcontainers default (checked), but base images are not
   # ours to assume. Through `env` the assignment is an argument to a command,
   # so no env policy applies.
-  note "ensuring code-server is installed"
+  # CODE_SERVER_VERSION pins it; unset or `latest` leaves the installer to
+  # resolve the newest release itself, which is the default. Pinning also makes
+  # the cache above deterministic — an unpinned install quietly accumulates a
+  # tarball per release.
+  #
+  # The leading `v` is stripped because the installer does not: it strips one
+  # only when resolving `latest` on its own, so an explicit `--version v4.138.0`
+  # builds a URL for code-server-v4.138.0-linux-amd64.tar.gz, which does not
+  # exist. The tag you copy off the releases page has the v.
+  local cs_version cs_arg=""
+  cs_version="${CODE_SERVER_VERSION:-latest}"
+  cs_version="${cs_version,,}"
+  case "$cs_version" in
+    latest) ;;
+    *[!0-9a-z.-]*) die "CODE_SERVER_VERSION='$cs_version' is not a version — use e.g. 4.138.0, or 'latest'" ;;
+    *) cs_arg=" --version ${cs_version#v}" ;;
+  esac
+
+  # Only ever installs into a container that has none, so changing the pin
+  # takes effect on `codespace rebuild`, not on the next `up`.
+  note "ensuring code-server is installed ($cs_version)"
   docker exec -u "$remote_user" "$cid" bash -lc \
-    "command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo env XDG_CACHE_HOME=$CONTAINER_CACHE sh -s -- --method standalone --prefix /usr/local" \
+    "command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo env XDG_CACHE_HOME=$CONTAINER_CACHE sh -s -- --method standalone --prefix /usr/local$cs_arg" \
     || die "could not install code-server in the container"
 
   # Real Codespaces injects GITHUB_TOKEN so `gh` works inside the container
