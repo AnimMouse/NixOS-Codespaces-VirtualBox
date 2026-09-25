@@ -262,7 +262,7 @@ cmd_up() {
   # takes the wrong branch. With nullglob unset, a pattern that matches nothing
   # survives literally and fails -e.
   local git_want="" ssh_cmd="" key=/persist/git/id_ed25519
-  local have_key=0 key_locked=0 have_agent=0
+  local have_key=0 key_locked=0 have_agent=0 agent_sock=/mnt/git-ssh/agent.sock
 
   [ -r "$key" ] && have_key=1
   # An encrypted key is still perfectly readable — it just cannot be *used*
@@ -300,7 +300,25 @@ cmd_up() {
     fi
     # A passphrase-protected key works without anything to prompt at, and the
     # crypto happens back on the VM.
-    args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=/tmp/ssh-agent.sock")
+    #
+    # Under /mnt/git-ssh with the rest of git's credentials, not in /tmp: the
+    # docker-in-docker entrypoint mounts a tmpfs over /tmp, which hid the socket
+    # while `docker inspect` still listed it. Nothing claims /mnt.
+    #
+    # Only safe because this mode never mounts the /persist/git directory at
+    # /mnt/git-ssh. If both ever coexist, docker creates this mount point
+    # inside /persist/git on the VM.
+    args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=$agent_sock")
+    # A container from before the move keeps /tmp/ssh-agent.sock: `up` reuses
+    # it and ignores changed mounts. Match it, so --remote-env below names a
+    # socket that exists. A rebuild removes it first, so gets the new path.
+    local existing
+    existing=$(container_any "$name")
+    if [ "$recreate" != recreate ] && [ -n "$existing" ]; then
+      case " $(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$existing") " in
+        *" /tmp/ssh-agent.sock "*) agent_sock=/tmp/ssh-agent.sock ;;
+      esac
+    fi
     git_want="agent"
     ssh_cmd="ssh"
   elif [ "$mode" = keyfile ] || { [ "$mode" = auto ] && [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; }; then
@@ -394,7 +412,7 @@ cmd_up() {
     fi
     ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=accept-new"
     args+=(--remote-env "GIT_SSH_COMMAND=$ssh_cmd")
-    [ "$git_want" = agent ] && args+=(--remote-env "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
+    [ "$git_want" = agent ] && args+=(--remote-env "SSH_AUTH_SOCK=$agent_sock")
     args+=(--remote-env "GIT_CONFIG_COUNT=1")
     args+=(--remote-env "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf")
     args+=(--remote-env "GIT_CONFIG_VALUE_0=https://github.com/")
@@ -433,7 +451,10 @@ cmd_up() {
   local mounts git_ssh=""
   mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$cid")
   case " $mounts " in
-    *" /tmp/ssh-agent.sock "*) git_ssh="agent" ;;
+    # Either path: containers created before the socket moved out of /tmp keep
+    # it there until rebuilt. Everything after uses the one actually mounted.
+    *" /mnt/git-ssh/agent.sock "*) git_ssh="agent"; agent_sock=/mnt/git-ssh/agent.sock ;;
+    *" /tmp/ssh-agent.sock "*)     git_ssh="agent"; agent_sock=/tmp/ssh-agent.sock ;;
     # The whole directory, so the private key is there and usable.
     *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
     # Only the public half — no way to authenticate from in here.
@@ -568,6 +589,8 @@ cmd_up() {
 
   [ -n "${APT_MIRROR:-}" ] && apply_apt_mirror "$cid" "$APT_MIRROR"
 
+  fix_dind_iptables "$cid"
+
   # Containers come up on UTC, so `date`, log timestamps and the editor's own
   # clock all disagree with the machine you are sitting at.
   #
@@ -589,8 +612,6 @@ cmd_up() {
   if [ -n "$tz" ]; then
     # Validated, not trusted: it is interpolated into a shell command that runs
     # as root in the container. Zone names are letters, digits, _ + - and /.
-  fix_dind_iptables "$cid"
-
     case "$tz" in
       *[!0-9A-Za-z_+/-]*) die "TIMEZONE='$tz' is not a zone name — e.g. Asia/Manila" ;;
     esac
@@ -622,7 +643,7 @@ cmd_up() {
     [ "${tz_status:-1}" = 0 ] && echo "export TZ=$tz"
     case "$git_ssh" in
       agent)
-        echo 'export SSH_AUTH_SOCK=/tmp/ssh-agent.sock'
+        echo "export SSH_AUTH_SOCK=$agent_sock"
         echo "export GIT_SSH_COMMAND=\"$ssh_cmd\""
         ;;
       keyfile)
@@ -667,7 +688,7 @@ cmd_up() {
     docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
     local -a envargs=(-e "PASSWORD=$(editor_password)")
     case "$git_ssh" in
-      agent)   envargs+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
+      agent)   envargs+=(-e "SSH_AUTH_SOCK=$agent_sock" -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
       keyfile) envargs+=(-e "GIT_SSH_COMMAND=$ssh_cmd") ;;
     esac
     docker exec -d -u "$remote_user" "${envargs[@]}" "$cid" bash -lc \
@@ -826,27 +847,6 @@ apply_apt_mirror() {
     || note "note: apt-get update against $mirror failed — run it yourself to see why"
 }
 
-# Only /workspaces/<the repo> is a mount. Anything else under /workspaces, and
-# anything in $HOME, lives in the container's writable layer and dies with it.
-# Say so before throwing the container away, rather than after.
-warn_ephemeral() {
-  local name="$1" cid kept entry found=0
-  cid=$(container_of "$name") || true
-  [ -n "$cid" ] || return 0
-
-  # Every bind mount under /workspaces is backed by something on /persist — the
-  # project itself and, when enabled, refs. Ask docker rather than assuming, so
-  # adding a mount later cannot turn into a false alarm.
-  kept=$(docker inspect "$cid" \
-    | jq -r '.[0].Mounts[] | select(.Destination | startswith("/workspaces/")) | .Destination' \
-    2>/dev/null | xargs -r -n1 basename || true)
-
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    printf '%s\n' "$kept" | grep -qxF "$entry" && continue
-    if [ "$found" = 0 ]; then
-      note "warning: these are not on /persist and will be lost:"
-      found=1
 # The docker-in-docker feature points iptables at iptables-legacy on every
 # Debian/Ubuntu release except resolute, whose kernel dropped the legacy tables.
 # So has this VM's: 6.18 with CONFIG_NETFILTER_XTABLES_LEGACY unset, meaning no
@@ -919,6 +919,27 @@ fix_dind_iptables() {
   docker exec "$cid" tail -n 5 /tmp/dockerd.log >&2 2>/dev/null || true
 }
 
+# Only /workspaces/<the repo> is a mount. Anything else under /workspaces, and
+# anything in $HOME, lives in the container's writable layer and dies with it.
+# Say so before throwing the container away, rather than after.
+warn_ephemeral() {
+  local name="$1" cid kept entry found=0
+  cid=$(container_of "$name") || true
+  [ -n "$cid" ] || return 0
+
+  # Every bind mount under /workspaces is backed by something on /persist — the
+  # project itself and, when enabled, refs. Ask docker rather than assuming, so
+  # adding a mount later cannot turn into a false alarm.
+  kept=$(docker inspect "$cid" \
+    | jq -r '.[0].Mounts[] | select(.Destination | startswith("/workspaces/")) | .Destination' \
+    2>/dev/null | xargs -r -n1 basename || true)
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    printf '%s\n' "$kept" | grep -qxF "$entry" && continue
+    if [ "$found" = 0 ]; then
+      note "warning: these are not on /persist and will be lost:"
+      found=1
     fi
     note "             /workspaces/$entry"
   done < <(docker exec "$cid" sh -c 'ls -1 /workspaces 2>/dev/null' 2>/dev/null || true)

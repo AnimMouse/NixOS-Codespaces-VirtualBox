@@ -73,6 +73,10 @@ stubbed or dry-run harnesses:
   create `up` should print `switching to iptables-nft` then `dockerd is up`, and
   `docker run --rm hello-world` inside should work. The diagnosis (no legacy
   tables) is read from the kernel config, not observed.
+- **The agent socket moved to `/mnt/git-ssh/agent.sock`.** An existing
+  codespace keeps `/tmp/ssh-agent.sock` on a plain `up`, and `ssh-add -l`
+  inside should still list the key; after `codespace rebuild` it should list it
+  from the new path, including in a codespace with docker-in-docker.
 
 ### Test scaffolding you no longer need
 

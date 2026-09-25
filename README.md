@@ -472,7 +472,7 @@ actually exposes under `/mnt/git-ssh`:
 
 | | Used when | Container gets | Private key exposed? |
 |---|---|---|---|
-| **ssh-agent** | the agent holds a key | the socket at `/tmp/ssh-agent.sock`, plus `id_ed25519.pub` and `known_hosts` as single-file mounts | **No** |
+| **ssh-agent** | the agent holds a key | the socket at `/mnt/git-ssh/agent.sock`, plus `id_ed25519.pub` and `known_hosts` as single-file mounts | **No** |
 | **key file** | no agent, and the key has no passphrase | the whole `/persist/git` directory, and `GIT_SSH_COMMAND` pointing at the key | Yes — it is the only way this mode can work |
 | **neither** | the key is passphrase-locked and no agent holds it | `id_ed25519.pub` and `known_hosts` only; a loud warning naming the `ssh-add` to run | No |
 
