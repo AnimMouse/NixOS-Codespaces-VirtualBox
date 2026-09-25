@@ -68,6 +68,11 @@ stubbed or dry-run harnesses:
   ones.
 - **The first rebuild still loses `~/.claude`** — the volume is created empty,
   so persistence starts from the rebuild after. Expect one more login.
+- **docker-in-docker comes up** — needs a codespace whose config lists
+  `ghcr.io/devcontainers/features/docker-in-docker:2`, not `dev-vm`. On first
+  create `up` should print `switching to iptables-nft` then `dockerd is up`, and
+  `docker run --rm hello-world` inside should work. The diagnosis (no legacy
+  tables) is read from the kernel config, not observed.
 
 ### Test scaffolding you no longer need
 
