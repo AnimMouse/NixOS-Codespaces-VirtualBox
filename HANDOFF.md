@@ -77,6 +77,9 @@ stubbed or dry-run harnesses:
   codespace keeps `/tmp/ssh-agent.sock` on a plain `up`, and `ssh-add -l`
   inside should still list the key; after `codespace rebuild` it should list it
   from the new path, including in a codespace with docker-in-docker.
+- **Claude Code can update itself.** `ls -ld "$(npm prefix -g)/lib/node_modules/@anthropic-ai"`
+  should show `vscode`, not `root`, and `claude update` should run without
+  "no write permission to npm prefix".
 
 ### Test scaffolding you no longer need
 

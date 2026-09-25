@@ -102,5 +102,14 @@
   //
   // The chown is for the .claude volume above, and must come first: it is what
   // makes the directory writable at all. Harmless when already correct.
-  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude && nix profile add nixpkgs/nixos-26.05#nil && nix --version && nil --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
+  //
+  // The second chown is for Claude Code's auto-updater. Features install as
+  // root, and the claude-code feature is a bare `npm install -g`, so under
+  // root's umask its package lands root-owned 0755 inside a prefix the node
+  // feature made vscode:nvm and group-writable for exactly this purpose. The
+  // updater cannot replace its own package and reports "no write permission to
+  // npm prefix", although the prefix itself is writable. The feature's fault,
+  // not this VM's, so a real Codespace needs this too. `npm prefix -g` because
+  // the path embeds the Node version, which moves with the node feature's LTS.
+  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude && sudo chown -R $(id -u):$(id -g) \"$(npm prefix -g)/lib/node_modules/@anthropic-ai\" && nix profile add nixpkgs/nixos-26.05#nil && nix --version && nil --version && echo 'Nix ready. Build here; apply with `rebuild` on the VM.'"
 }
