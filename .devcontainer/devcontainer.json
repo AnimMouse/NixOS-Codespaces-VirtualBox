@@ -2,7 +2,12 @@
   "name": "dev-vm",
 
   // Plain Ubuntu: the toolchain comes from Nix, not from the image.
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  //
+  // Pinned, as the launcher's default is. 26.04 swaps in uutils (the Rust
+  // coreutils) but keeps classic sudo, and the base image renames Ubuntu's own
+  // uid-1000 user to vscode, so the volumes below keep their ownership. The
+  // tag has no hyphen: `ubuntu-26.04` is a 404.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu26.04",
 
   "features": {
     // Single-user install. A container has no systemd, so the multi-user

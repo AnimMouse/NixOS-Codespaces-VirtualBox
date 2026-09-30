@@ -567,11 +567,16 @@ default to `/persist/codespace/<name>/devcontainer.json` and passes it as
 `--override-config`. Nothing is added to your checkout; edit that file and
 `codespace rebuild`.
 
-Change the default image for new codespaces in `/persist/codespace/config`:
+The default image is pinned to `mcr.microsoft.com/devcontainers/base:ubuntu26.04`
+rather than the bare `:ubuntu` tag, which follows the newest Ubuntu. Change it
+for new codespaces in `/persist/codespace/config`:
 
 ```bash
 DEFAULT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 ```
+
+A codespace that already has a generated config keeps its image; edit
+`/persist/codespace/<name>/devcontainer.json` and `codespace rebuild` to move it.
 
 It is used **only while the repo has no config of its own**. Commit a real
 `.devcontainer/devcontainer.json` and it takes over on the next rebuild.

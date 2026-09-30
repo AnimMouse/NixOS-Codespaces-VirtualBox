@@ -80,6 +80,12 @@ stubbed or dry-run harnesses:
 - **Claude Code can update itself.** `ls -ld "$(npm prefix -g)/lib/node_modules/@anthropic-ai"`
   should show `vscode`, not `root`, and `claude update` should run without
   "no write permission to npm prefix".
+- **dev-vm on Ubuntu 26.04.** The image moved from `ubuntu-24.04` to
+  `ubuntu26.04`, which brings uutils in place of GNU coreutils. After
+  `codespace rebuild dev-vm`: `postCreateCommand` ends with the `nil` version
+  line, the editor comes up, and `git commit` still signs. The volumes should
+  need nothing — vscode is uid 1000 in both images. To back out, restore the
+  old tag and rebuild.
 
 ### Test scaffolding you no longer need
 
@@ -205,7 +211,7 @@ typo and watching `SC2154` stop it.
 |---|---|---|
 | `DOTFILES_REPOSITORY` | — | passed to `devcontainer up` |
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
-| `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu` | for repos with no devcontainer.json |
+| `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for repos with no devcontainer.json |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |

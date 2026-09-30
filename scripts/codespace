@@ -235,12 +235,18 @@ cmd_up() {
   #
   # It is only used while the repo has no config of its own. Commit a real
   # .devcontainer/devcontainer.json and it takes over on the next rebuild.
+  #
+  # The image is pinned to a release, as nixpkgs is in flake.lock. The bare
+  # `base:ubuntu` tag follows the newest Ubuntu, and moving to 26.04 under us
+  # was enough to break docker-in-docker's default install. `ubuntu26.04` has
+  # no hyphen: `ubuntu-26.04` is a 404, although `ubuntu-24.04` exists. Only
+  # new codespaces see a change here — an existing generated file is kept.
   if [ ! -f "$ws/.devcontainer/devcontainer.json" ] && [ ! -f "$ws/.devcontainer.json" ]; then
     local override="$STATE/$name/devcontainer.json"
     if [ ! -f "$override" ]; then
       note "no devcontainer.json in the repo — writing a default to $override"
       printf '{\n  "name": "%s",\n  "image": "%s"\n}\n' \
-        "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu}" > "$override"
+        "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu26.04}" > "$override"
     fi
     args+=(--override-config "$override")
   fi
