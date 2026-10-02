@@ -14,7 +14,9 @@ let
 
   rebuild = pkgs.writeShellApplication {
     name = "rebuild";
-    runtimeInputs = with pkgs; [ git nixos-rebuild ];
+    # The system's own nix, so the no-change build agrees with what
+    # nixos-rebuild then evaluates.
+    runtimeInputs = with pkgs; [ git nixos-rebuild coreutils config.nix.package ];
     text = substituted "rebuild" (builtins.readFile ../scripts/rebuild);
   };
 

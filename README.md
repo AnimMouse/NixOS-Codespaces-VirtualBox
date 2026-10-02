@@ -373,8 +373,13 @@ After changing anything in this repo:
 ```bash
 rebuild --pull          # git pull /persist/dev-vm, then switch
 rebuild                 # switch without pulling
+rebuild --force         # switch even if nothing changed
 rebuild --rollback      # anything else goes straight to nixos-rebuild
 ```
+
+`rebuild` builds first and stops with `no changes` when the result is the
+system already running, rather than re-running the switch to report "Done".
+Passing any nixos-rebuild argument skips that check.
 
 From Windows, without logging in:
 

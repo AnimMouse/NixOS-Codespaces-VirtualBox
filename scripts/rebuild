@@ -1,26 +1,35 @@
-# rebuild [--pull] [extra nixos-rebuild arguments]
+# rebuild [--pull] [--force] [extra nixos-rebuild arguments]
 #
 # The everyday `nixos-rebuild switch` for this VM, with the flake path already
 # filled in. --pull fetches this repo first, which is the usual reason for
 # rebuilding at all.
 #
+# Builds first and stops if the result is the system already running. Nix
+# would not record a new generation for it anyway — `nix-env --set` with the
+# current path is a no-op — but switch still reinstalls the bootloader config,
+# re-runs activation, and prints "Done. The new configuration is …", which
+# reads as though something changed.
+#
 # Built by modules/tools.nix with pkgs.writeShellApplication.
 
-pull=0
+pull=0 force=0
 declare -a extra=()
 for arg in "$@"; do
   case "$arg" in
     --pull) pull=1 ;;
+    --force) force=1 ;;
     -h|--help)
       # A heredoc, not `sed "$0"`: writeShellApplication prepends its own
       # shebang and set-options, so line numbers here are not line numbers
       # there.
       cat >&2 <<'USAGE'
-usage: rebuild [--pull] [extra nixos-rebuild arguments]
+usage: rebuild [--pull] [--force] [extra nixos-rebuild arguments]
 
   --pull   git pull @FLAKE_DIR@ first (--ff-only)
+  --force  switch even when the build matches the running system
 
-Anything else is passed straight to nixos-rebuild, e.g.
+Anything else is passed straight to nixos-rebuild, and skips the
+no-change check, e.g.
   rebuild --pull --show-trace
   rebuild --rollback
 USAGE
@@ -35,6 +44,24 @@ if [ "$pull" = 1 ]; then
   # --ff-only so a dirty or diverged working copy stops here rather than
   # producing a merge nobody asked for mid-rebuild.
   git -C "@FLAKE_DIR@" pull --ff-only
+fi
+
+# Only with no extra arguments: they are nixos-rebuild's, not nix build's, and
+# some (--rollback) are not about the flake at all. The build is not wasted —
+# switch evaluates again but finds every path already in the store.
+#
+# Compared against /run/current-system, not the newest generation: after a
+# `--rollback` or a boot into an older entry, the two differ, and running is
+# what a switch changes.
+if [ "$force" = 0 ] && [ "${#extra[@]}" -eq 0 ]; then
+  echo "==> building @FLAKE_DIR@#@FLAKE_ATTR@"
+  new=$(nix build --no-link --print-out-paths \
+    "@FLAKE_DIR@#nixosConfigurations.@FLAKE_ATTR@.config.system.build.toplevel")
+  if [ "$new" = "$(readlink -f /run/current-system)" ]; then
+    echo "==> no changes: already running $new"
+    echo "    (rebuild --force to switch anyway)"
+    exit 0
+  fi
 fi
 
 echo "==> nixos-rebuild switch --flake @FLAKE_DIR@#@FLAKE_ATTR@"
