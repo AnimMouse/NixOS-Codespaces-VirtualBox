@@ -129,10 +129,11 @@ modules/
 home/dev.nix                   # home-manager: VM-layer dotfiles
 scripts/
 ├── codespace                  # launcher: up / new / rebuild / down / rm / list / logs
-├── rebuild                    # rebuild [--pull]
+├── rebuild                    # rebuild [--pull] [--force]
 ├── ssh-auth                   # unlock the git key into the agent
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
+docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials
 .github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
 ```
 

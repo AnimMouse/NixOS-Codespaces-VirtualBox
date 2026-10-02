@@ -642,10 +642,11 @@ home/dev.nix                    VM dotfiles: git, ssh, gh, bash, tmux
   tools.nix                     the `rebuild` and `ssh-auth` commands
 paths.nix                       where identity and key material live (paths only)
 scripts/codespace               the launcher
-scripts/rebuild                 rebuild [--pull]
+scripts/rebuild                 rebuild [--pull] [--force]
 scripts/ssh-auth                unlock the git key into the agent
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 docs/BOOTSTRAP.md               full install walkthrough
+docs/GITHUB-APP.md              plan: scoped GitHub credentials per codespace
 CLAUDE.md                       design decisions and constraints
 ```
 
