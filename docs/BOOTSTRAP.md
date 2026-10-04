@@ -202,6 +202,24 @@ ssh -p 2222 dev@localhost
 Those host keys now live in `/persist/ssh/`, so this is the last time you have
 to do it — reinstalls will reuse the same fingerprint.
 
+### Optional: log in with your SSH key
+
+sshd reads `/persist/ssh/authorized_keys.dev` (from `modules/persist.nix`) as
+well as `~/.ssh/authorized_keys`, so a key added now survives every later
+reinstall. The password does not: `passwd` writes to `system.vdi`, and a
+reinstall brings back the `dev` default.
+
+```powershell
+ssh-keygen -t ed25519           # on Windows, only if you have no key yet
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub |
+  ssh -p 2222 dev@localhost 'sudo tee -a /persist/ssh/authorized_keys.dev >/dev/null'
+ssh -p 2222 -o PreferredAuthentications=publickey dev@localhost true
+```
+
+The last line refuses to fall back to a password, so it succeeding is the
+proof. Leave `PasswordAuthentication` on: the forward is bound to `127.0.0.1`,
+and the password is what gets you back in if the key file is ever missing.
+
 ---
 
 ## 8. Set up the rebuild loop

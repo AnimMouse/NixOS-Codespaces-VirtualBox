@@ -74,6 +74,29 @@ sudo chown -R dev:users /persist/dev-vm
 passwd                          # change the default password
 ```
 
+### Log in with your SSH key
+
+Optional, and it outlives the password: `passwd` writes to the system disk, so
+a reinstall resets the password to `dev`, while this file is on `/persist`.
+From PowerShell on Windows:
+
+```powershell
+ssh-keygen -t ed25519           # only if you have no key yet
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub |
+  ssh -p 2222 dev@localhost 'sudo tee -a /persist/ssh/authorized_keys.dev >/dev/null'
+
+# succeeds only with the key: a password is not offered
+ssh -p 2222 -o PreferredAuthentications=publickey dev@localhost true
+```
+
+Windows has no `ssh-copy-id`, hence the pipe. `~/.ssh/authorized_keys` works
+too and also persists, since home is on `/persist`.
+
+Password login stays on. sshd is reachable only through the `127.0.0.1`
+forward, and the password is the way back in after a reinstall if the key file
+is ever missing — the lockout assertion can see keys declared in the config,
+not keys in this file.
+
 ## 3. GitHub: one SSH key for everything
 
 GitHub keeps authentication keys and signing keys in separate lists but accepts
