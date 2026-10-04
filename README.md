@@ -473,6 +473,90 @@ A name is resolved by asking the VM over SSH. `F11` leaves kiosk mode, `Alt+F4`
 closes. Inside the editor, **`F1` is the command palette** — `Ctrl+Shift+P`
 opens a Firefox private window.
 
+## Disk space
+
+The VM's own Nix store is on `system.vdi` and cleans itself: `nix.gc` drops
+generations older than 30 days, weekly. Everything below is about `/persist`.
+
+### What is using it
+
+```bash
+sudo du -xh -d1 /persist | sort -h        # top-level split; -x stays on this disk
+docker system df -v                       # images, containers, volumes, build cache
+
+sudo nix run nixpkgs/nixos-26.05#ncdu -- -x /persist     # interactive, nothing installed
+```
+
+The usual suspects:
+
+| Path | What | Cleaned automatically? |
+|---|---|---|
+| `/persist/docker` | images, containers, volumes, build cache | partly — the weekly prune skips tagged images, so every rebuild's image stays |
+| `/persist/docker/volumes/dev-vm-nix-store` | the Nix store *inside* this repo's codespace | **never** — not the VM's store |
+| `/persist/docker/volumes/dind-var-lib-docker-*` | each docker-in-docker codespace's own images | only by `codespace rm --volume` |
+| `/persist/codespace/cache` | code-server release tarballs, one per version | never |
+| `/persist/repos`, `/persist/refs` | your checkouts | never |
+
+### Freeing it, safest first
+
+```bash
+codespace list                   # what exists and how long it has been idle
+codespace gc --dry-run           # what the 30-day retention would remove
+codespace rm <name> --volume     # a codespace you are done with, and its volumes
+
+docker builder prune             # build cache — always safe
+docker image prune -a            # images no container uses, stopped codespaces included
+```
+
+`docker image prune -a` keeps every image a container still uses, so nothing
+running or stopped breaks; the next rebuild downloads its base image again.
+
+Inside the dev-vm codespace, `nix-collect-garbage -d` cleans its store volume —
+often the largest single thing here, and nothing does it for you.
+
+`rm -rf /persist/codespace/cache/*` is safe; versions still in use download
+again on demand.
+
+Avoid `docker volume prune -a`. Docker 29 prunes only anonymous volumes unless
+given `-a`, and with it removes every named volume not attached to a container —
+including the shared `dev-vm-nix-store` if that codespace happens not to exist
+at the time. `codespace rm --volume` is the targeted form.
+
+### Growing `persist.vdi`
+
+One GPT partition holding ext4, which grows while mounted. Nothing in the repo
+changes: `disko-persist.nix` says `size = "100%"` and only applies on a first
+install.
+
+In VirtualBox, with the VM **powered off**:
+
+1. **Back it up**: File → Tools → Media → right-click `persist.vdi` → Copy.
+   This disk is the only thing you cannot rebuild.
+2. Select `persist.vdi` there and set **Size**, e.g. 100 GB, then Apply. Only a
+   dynamically allocated VDI can be resized, and snapshots complicate it —
+   delete them first.
+
+Then boot, and on the VM:
+
+```bash
+D=/dev/disk/by-path/pci-0000:00:1f.2-ata-2    # SATA port 1, as the config names it
+lsblk "$D"            # the disk shows the new size; one partition, still the old size
+
+sudo nix run nixpkgs/nixos-26.05#gptfdisk -- sgdisk -e "$D"            # move GPT's backup header to the new end
+sudo nix shell nixpkgs/nixos-26.05#cloud-utils -c growpart "$D" 1      # grow partition 1 into the free space
+sudo resize2fs /dev/disk/by-label/persist                               # grow ext4 to fill it, mounted
+
+df -h /persist
+```
+
+Check `lsblk` first: this assumes the single partition disko creates, numbered
+1. By `by-path`, never `/dev/sdX`, for the reason in
+[Why it is built this way](#why-it-is-built-this-way).
+
+Expect `df` to show a little under the disk size — about 98G for 100 GB, the
+rest being filesystem overhead — and Avail to fall a further 5% short of
+Size minus Used: ext4 reserves that for root.
+
 ---
 
 # How the pieces fit
