@@ -86,6 +86,10 @@ stubbed or dry-run harnesses:
   line, the editor comes up, and `git commit` still signs. The volumes should
   need nothing — vscode is uid 1000 in both images. To back out, restore the
   old tag and rebuild.
+- **`codespace ls --size` reads the real daemon.** Built against the
+  docker-v29.7.2 API spec and a synthetic response only. Rows plus footer should
+  roughly match `docker system df` and `du -sxh /persist`; a `?` in IMAGE on
+  every row would mean the daemon does not compute `SharedSize` here.
 
 ### Test scaffolding you no longer need
 
@@ -235,6 +239,7 @@ codespace rebuild <name>        # recreate the container, keep the port
 codespace down <name>           # stop it
 codespace rm <name> [opts]      # --repo drops the checkout, --volume its volumes
 codespace list                  # + IDLE, the clock gc is counting
+codespace list --size           # disk per codespace, and what is shared
 codespace logs <name>
 codespace gc [--dry-run]        # what the daily timer runs; --dry-run to preview
 ```

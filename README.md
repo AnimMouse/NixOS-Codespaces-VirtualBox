@@ -213,6 +213,7 @@ the password is shared with the hub editor and printed by `up`.
 | `codespace rm <name>` | Delete the container and its port. **Keeps the checkout** |
 | `codespace rm <name> --repo` | …and delete `/persist/repos/<name>` too |
 | `codespace list` | Name, port, state, URL |
+| `codespace list --size` | Disk used by each: container, image, volumes, checkout |
 | `codespace logs <name>` | Editor log, when the URL will not load |
 
 `down` versus `rm`: `down` is closing the lid, `rm` is throwing the machine
@@ -481,11 +482,21 @@ generations older than 30 days, weekly. Everything below is about `/persist`.
 ### What is using it
 
 ```bash
+codespace ls --size                       # per codespace, plus what no one codespace owns
 sudo du -xh -d1 /persist | sort -h        # top-level split; -x stays on this disk
 docker system df -v                       # images, containers, volumes, build cache
 
 sudo nix run nixpkgs/nixos-26.05#ncdu -- -x /persist     # interactive, nothing installed
 ```
+
+`codespace ls --size` charges each codespace only what it has to itself — its
+container's writable layer, the image layers no other image has, volumes no
+other container mounts, and its checkout — and lists the rest underneath:
+shared volumes such as `dev-vm-nix-store`, shared base layers, unattached
+volumes, build cache, `/persist/refs` and the editor cache. Rows plus footer
+add up to what is on disk, rather than counting a shared thing twice. `?` means
+Docker did not report a figure. It is slow by nature: Docker measures a volume
+by walking every file in it.
 
 The usual suspects:
 

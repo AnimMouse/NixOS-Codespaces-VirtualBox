@@ -6,7 +6,7 @@
 #   codespace shell <name>         a terminal inside it, in a tmux on the VM
 #   codespace down <name>          stop it (the CLI has no `down` of its own)
 #   codespace rm <name> [opts]     delete it; --repo drops the checkout, --volume its volumes
-#   codespace list                 what exists, on which port
+#   codespace list [--size]        what exists, on which port; --size: disk used by each
 #   codespace logs <name>          editor log, for when the URL does not answer
 #   codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
 #
@@ -47,7 +47,7 @@ usage:
   codespace shell <name>         a terminal inside it, in a tmux on the VM
   codespace down <name>          stop it, keeping the container
   codespace rm <name> [opts]     delete it; --repo drops the checkout, --volume its volumes
-  codespace list                 what exists, on which port
+  codespace list [--size]        what exists, on which port; --size: disk used by each
   codespace logs <name>          editor log, for when the URL does not answer
   codespace gc [--dry-run]       drop containers idle past RETENTION_DAYS
 USAGE
@@ -1085,6 +1085,15 @@ cmd_rm() {
 }
 
 cmd_list() {
+  local size=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s|--size) size=1; shift ;;
+      *) die "unknown option '$1' for list (try --size)" ;;
+    esac
+  done
+  if [ "$size" = 1 ]; then list_sizes; return; fi
+
   local dir name port cid status idle
   printf '%-22s %-6s %-8s %-6s %s\n' NAME PORT STATE IDLE URL
   for dir in "$STATE"/*/; do
@@ -1092,16 +1101,121 @@ cmd_list() {
     name=$(basename "$dir")
     [ -f "$dir/port" ] || continue
     port=$(cat "$dir/port")
-    cid=$(container_of "$name")
-    # IDLE is what the retention sweep is counting, so it is only meaningful
-    # for the state the sweep looks at. A running codespace is never a
-    # candidate, and an absent one has nothing left to reclaim.
-    if [ -n "$cid" ]; then status=running; idle="-"
-    elif [ -n "$(container_any "$name")" ]; then
-      status=stopped; idle="$(idle_days "$name")d"
-    else status=absent; idle="-"; fi
+    read -r status idle <<<"$(codespace_state "$name")"
     printf '%-22s %-6s %-8s %-6s %s\n' "$name" "$port" "$status" "$idle" "http://localhost:$port/"
   done
+}
+
+# IDLE is what the retention sweep is counting, so it is only meaningful for the
+# state the sweep looks at. A running codespace is never a candidate, and an
+# absent one has nothing left to reclaim.
+codespace_state() {
+  if [ -n "$(container_of "$1")" ]; then echo "running -"
+  elif [ -n "$(container_any "$1")" ]; then echo "stopped $(idle_days "$1")d"
+  else echo "absent -"; fi
+}
+
+# Bytes to 1.7G; "-" stays "-" for a part that does not exist.
+human() {
+  case "$1" in
+    -|"") echo "-" ;;
+    *) numfmt --to=iec "$1" ;;
+  esac
+}
+
+# Bytes under a path, or 0. Files a container created as some other uid can be
+# unreadable; du still totals what it can, which is the useful answer.
+du_bytes() {
+  [ -e "$1" ] || { echo 0; return; }
+  du -sxb "$1" 2>/dev/null | cut -f1 || echo 0
+}
+
+# Only what a codespace has to itself is charged to it, so the rows plus the
+# footer add up to what is on disk rather than counting a shared thing twice.
+# Base layers shared between images, an image two codespaces were built from,
+# and a volume mounted in more than one container (the dev-vm Nix store) are
+# real space with no honest single owner, and go in the footer.
+#
+# One request to the engine API rather than `docker system df -v`, which only
+# prints rounded human sizes. Pinned to v1.55 (Docker 29): the response shape
+# changed in that version — ImageUsage/ContainerUsage/… with Items only under
+# verbose=true — and a pinned version is answered in the shape it had, so a
+# newer daemon cannot silently change what this parses. Checked against the
+# docker-v29.7.2 swagger, including that SharedSize and RefCount can be -1 for
+# "not calculated", which is shown as unknown rather than as zero.
+list_sizes() {
+  note "measuring — docker walks every file in every volume, so this can take a while"
+  local df
+  df=$(curl -fsS --unix-socket /var/run/docker.sock \
+    "http://localhost/v1.55/system/df?verbose=true") \
+    || die "could not read disk usage from docker (is the daemon up, and are you in the docker group?)"
+
+  # Per codespace: name, writable layer, unique image size, own volumes.
+  # "?" is unknown: the daemon reported -1, or the image is shared.
+  local rows
+  rows=$(printf '%s' "$df" | jq -r '
+    (.VolumeUsage.Items // [] | map({key: .Name, value: .UsageData}) | from_entries) as $vol
+    | (.ImageUsage.Items // [] | map({key: .Id, value: .}) | from_entries) as $img
+    | .ContainerUsage.Items // [] | .[]
+    | select(.Labels.codespace != null)
+    | ($img[.ImageID]) as $i
+    | [ .Labels.codespace,
+        (.SizeRw // 0),
+        (if $i == null or $i.SharedSize < 0 then "?"
+         elif $i.Containers == 1 then $i.Size - $i.SharedSize
+         else "shared" end),
+        ([.Mounts[]? | select(.Type == "volume") | $vol[.Name]
+          | select(. != null and .RefCount == 1 and .Size >= 0) | .Size] | add // 0)
+      ] | @tsv')
+
+  local dir name status idle rw img vols repo total ws part n a b c
+  printf '%-22s %-8s %9s %9s %9s %9s %9s\n' NAME STATE CONTAINER IMAGE VOLUMES REPO TOTAL
+  for dir in "$STATE"/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    [ -f "$dir/port" ] || continue
+    read -r status idle <<<"$(codespace_state "$name")"
+    rw=- img=- vols=-
+    if [ "$status" != absent ]; then
+      while IFS=$'\t' read -r n a b c; do
+        [ "$n" = "$name" ] && { rw=$a img=$b vols=$c; break; }
+      done <<<"$rows"
+    fi
+    ws=$(cat "$dir/workspace" 2>/dev/null || true)
+    repo=$(du_bytes "$ws")
+    total=$repo
+    for part in "$rw" "$img" "$vols"; do
+      case "$part" in ''|*[!0-9]*) ;; *) total=$((total + part)) ;; esac
+    done
+    case "$img" in shared|"?") ;; *) img=$(human "$img") ;; esac
+    printf '%-22s %-8s %9s %9s %9s %9s %9s\n' "$name" "$status" \
+      "$(human "$rw")" "$img" "$(human "$vols")" "$(human "$repo")" "$(human "$total")"
+  done
+
+  # Everything with no single owner, so the whole adds up. jq picks the
+  # numbers, bash formats them, so the footer reads like the table above.
+  echo
+  echo "shared and unowned:"
+  local label bytes what
+  while IFS=$'\t' read -r label bytes what; do
+    printf '  %-16s %9s  %s\n' "$label" "$(human "$bytes")" "$what"
+  done < <(printf '%s' "$df" | jq -r --arg rows "$rows" '
+    ($rows | split("\n") | map(split("\t") | (.[2] | tonumber?) // 0) | add // 0) as $charged
+    | (.VolumeUsage.Items // []) as $v
+    | ($v | map(select(.UsageData.RefCount == 0))) as $u
+    | ([.ContainerUsage.Items // [] | .[] | select(.Labels.codespace == null) | .SizeRw // 0] | add // 0) as $other
+    | ( [ $v[] | select(.UsageData.RefCount > 1 and .UsageData.Size >= 0)
+          | ["shared volume", .UsageData.Size, "\(.Name), in \(.UsageData.RefCount) containers"] ]
+      + (if ($u | length) > 0 then
+          [["unattached", ([$u[].UsageData.Size | select(. >= 0)] | add // 0),
+            "\($u | length) volume(s) no container uses — codespace rm --volume, or docker volume rm"]]
+         else [] end)
+      + [["images", ((.ImageUsage.TotalSize // 0) - $charged), "shared layers, and images not charged above"]]
+      + [["build cache", (.BuildCacheUsage.TotalSize // 0), "docker builder prune"]]
+      + (if $other > 0 then [["other containers", $other, "not codespaces"]] else [] end)
+      ) | .[] | @tsv')
+  printf '  %-16s %9s  %s\n' "refs" "$(human "$(du_bytes "$REFS")")" "$REFS"
+  printf '  %-16s %9s  %s\n' "editor cache" "$(human "$(du_bytes "$CACHE")")" "$CACHE"
 }
 
 # The Codespaces retention behaviour, on a real last-used clock. Deliberately
