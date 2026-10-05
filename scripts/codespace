@@ -21,6 +21,10 @@ REFS=/persist/refs
 # a codespace called the same thing would land on the same path.
 REFS_NAME=refs
 STATE=/persist/codespace
+# Where `rm` without --repo notes which checkout a codespace used, so a later
+# `rm <name> --repo` deletes that checkout rather than guessing one from the
+# name. Dot-named so the `$STATE/*/` loops never mistake it for a codespace.
+REMOVED=$STATE/.removed
 # Shared download cache, mounted into every container. Exists because the
 # code-server tarball is ~200 MB and its installer caches into $HOME/.cache,
 # which is container layer and so dies on every rebuild. See cmd_up.
@@ -212,6 +216,8 @@ cmd_up() {
   port=$(allocate_port "$name")
   echo "$port" > "$STATE/$name/port"
   echo "$ws" > "$STATE/$name/workspace"
+  # Alive again, so a note left by an earlier `rm` no longer describes it.
+  rm -f "$REMOVED/$name"
 
   # Read before anything that might consult DEFAULT_IMAGE or DOTFILES_*.
   load_config
@@ -1070,18 +1076,63 @@ cmd_rm() {
     fi
   done
 
+  # Which checkout this codespace used, read before its state goes: the path it
+  # recorded at `up`, else the note an earlier `rm` left, else — only for a
+  # codespace removed before those notes existed — the conventional
+  # $REPOS/<name>. Deriving it from the name alone deleted the wrong directory
+  # when a codespace had been started from a path elsewhere and something else
+  # of the same name lived in $REPOS.
+  local ws=""
+  if [ -f "$STATE/$name/workspace" ]; then ws=$(cat "$STATE/$name/workspace")
+  elif [ -f "$REMOVED/$name" ]; then ws=$(cat "$REMOVED/$name")
+  elif [ -d "$REPOS/$name" ]; then ws="$REPOS/$name"; fi
+
   # Drops the port reservation and any generated devcontainer.json, so the next
   # `up` starts clean. The checkout is left alone unless asked: it is the one
   # thing here that might hold work that is not pushed yet.
   rm -rf "${STATE:?}/$name"
 
   if [ "$keep_repo" = 0 ]; then
-    note "removing $REPOS/$name"
-    rm -rf "${REPOS:?}/$name"
-  elif [ -d "$REPOS/$name" ]; then
-    echo "  the checkout is still at $REPOS/$name"
-    echo "  'codespace rm $name --repo' deletes that too"
+    remove_checkout "$name" "$ws"
+  elif [ -n "$ws" ]; then
+    mkdir -p "$REMOVED"
+    printf '%s\n' "$ws" > "$REMOVED/$name"
+    if [ -d "$ws" ]; then
+      echo "  the checkout is still at $ws"
+      if under_repos "$ws"; then
+        echo "  'codespace rm $name --repo' deletes that too"
+      else
+        echo "  it is not directly under $REPOS once symlinks are followed, so --repo will not delete it"
+      fi
+    fi
   fi
+}
+
+# Deletes a codespace's checkout, but only one directly under $REPOS — where
+# `up <url>` clones and `new` creates. A codespace started from a path
+# elsewhere (`up /persist/refs/foo`, or any directory) points at something this
+# script did not make and may not be the only user of, so that stays yours to
+# delete. Compared after realpath, so a symlink cannot walk the check outside.
+under_repos() {
+  local real repos
+  real=$(realpath -e "$1" 2>/dev/null) || return 1
+  repos=$(realpath -e "$REPOS" 2>/dev/null) || return 1
+  [ "$(dirname "$real")" = "$repos" ]
+}
+
+remove_checkout() {
+  local name="$1" ws="$2" real
+  if [ -z "$ws" ] || [ ! -e "$ws" ]; then
+    note "no checkout left to remove for $name${ws:+ (was $ws)}"
+    rm -f "$REMOVED/$name"
+    return 0
+  fi
+  real=$(realpath -e "$ws")
+  under_repos "$real" \
+    || die "not deleting $real: --repo only removes checkouts directly under $REPOS. Delete it by hand if you mean to."
+  note "removing $real"
+  rm -rf "${real:?}"
+  rm -f "$REMOVED/$name"
 }
 
 cmd_list() {

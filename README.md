@@ -211,13 +211,20 @@ the password is shared with the hub editor and printed by `up`.
 | `codespace rebuild <name>` | Recreate the container from scratch, same port |
 | `codespace down <name>` | Stop it. Fast to restart, keeps installed packages |
 | `codespace rm <name>` | Delete the container and its port. **Keeps the checkout** |
-| `codespace rm <name> --repo` | …and delete `/persist/repos/<name>` too |
+| `codespace rm <name> --repo` | …and delete its checkout too — also works later, on a codespace already removed without it |
 | `codespace list` | Name, port, state, URL |
 | `codespace list --size` | Disk used by each: container, image, volumes, checkout |
 | `codespace logs <name>` | Editor log, when the URL will not load |
 
 `down` versus `rm`: `down` is closing the lid, `rm` is throwing the machine
 away. Both leave your code alone.
+
+`--repo` deletes the checkout the codespace actually used — remembered after a
+plain `rm`, so it can be added afterwards — and only when that checkout sits
+directly under `/persist/repos`. One started from a path elsewhere is refused
+and left for you to delete. `--volume` cannot be added afterwards: the
+container's mount list is the only record of which volumes were its, and the
+first `rm` removed it. Find those with `docker volume ls -f dangling=true`.
 
 **A blank codespace** — for scratch work, trying a language, or anything with no
 repo yet — is `codespace new <name>`. It creates an empty `/persist/repos/<name>`
