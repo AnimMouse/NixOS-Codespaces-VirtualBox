@@ -35,8 +35,13 @@
   users.users.dev.home = "/persist/home/dev";
 
   systemd.tmpfiles.rules = [
-    # 0700: authorized keys and, later, git credentials live under here.
-    "d /persist/ssh          0700 root root -"
+    # 0711, not 0700: sshd opens authorized_keys files *as the user*
+    # (temporarily_use_uid in auth2-pubkey.c), so dev must be able to traverse
+    # this directory to reach authorized_keys.dev. At 0700 the open failed with
+    # EACCES and key login silently never worked. Execute without read: dev can
+    # reach a file it knows the name of, but not list the directory. The host
+    # private keys stay 0600 root, so traversal exposes nothing.
+    "d /persist/ssh          0711 root root -"
     "d /persist/home         0755 root root -"
     "d /persist/home/dev     0700 dev  users -"
     # Repos checked out by hand or, from Phase 2, by the codespace launcher.

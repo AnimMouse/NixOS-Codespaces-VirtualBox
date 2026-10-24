@@ -345,6 +345,8 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
 - **Host RAM** is not returned by VirtualBox on its own. Save the machine state
   rather than shutting down; README "Host memory" has the balloon and sizing
   options.
-- **Key login works** and survives reinstalls via
-  `/persist/ssh/authorized_keys.dev`; password login stays on deliberately.
-  README setup step 2 and BOOTSTRAP step 7.
+- **Key login via `/persist/ssh/authorized_keys.dev` never worked** until
+  `/persist/ssh` went from 0700 to 0711: sshd opens that file as `dev`, who
+  could not enter the directory. Fixed and confirmed: sshd logs
+  `Accepted publickey for dev` with an ED25519 key.
+  Password login stays on deliberately. README setup step 2, BOOTSTRAP step 7.
