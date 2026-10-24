@@ -19,6 +19,7 @@ current. This file only covers what *changes* when the workbench moves.
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
 | Planned, not built | Scoped GitHub credentials per codespace — [docs/GITHUB-APP.md](docs/GITHUB-APP.md). Today every container can act as the whole account |
+| Planned, not built | Editor access by client certificate — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). Today every container holds the hub password and can reach the hub, which is root on the VM |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
 `/persist`, never in git. `paths.nix` records the locations and no values.

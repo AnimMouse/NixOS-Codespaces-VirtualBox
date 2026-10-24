@@ -800,6 +800,7 @@ scripts/vm                      container side: `vm status`, `vm build`, …
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 docs/BOOTSTRAP.md               full install walkthrough
 docs/GITHUB-APP.md              plan: scoped GitHub credentials per codespace
+docs/EDITOR-MTLS.md             plan: editor access by client certificate, no password
 CLAUDE.md                       design decisions and constraints
 ```
 
