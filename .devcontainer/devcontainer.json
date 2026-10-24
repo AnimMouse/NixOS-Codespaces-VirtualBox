@@ -75,6 +75,23 @@
     "source=claude-${devcontainerId},target=/home/vscode/.claude,type=volume"
   ],
 
+  // Claude Code keeps one file outside that directory: ~/.claude.json, its
+  // global config — onboarding state, per-project trust, MCP servers. In $HOME
+  // it is container layer, so every rebuild lost it and Claude Code came up
+  // with "configuration file not found", offering a backup to restore by hand.
+  // The volume above survived; only this file did not.
+  //
+  // With CLAUDE_CONFIG_DIR set, the file moves inside that directory: the
+  // binary resolves it as join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")
+  // (checked in 2.1.310). Pointing it at the default directory changes nothing
+  // else — settings, credentials and history already live there.
+  //
+  // containerEnv, not remoteEnv: the launcher starts the editor with
+  // `docker exec`, and only the container's own environment reaches that.
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+  },
+
   "customizations": {
     "vscode": {
       // Open VSX has nix-ide; the Microsoft marketplace is not reachable from

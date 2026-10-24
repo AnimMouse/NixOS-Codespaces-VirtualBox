@@ -56,13 +56,22 @@ If you touch any of these, you can now test them properly rather than by proxy.
   lingering): the key loads, and containers see it through the forwarded socket.
 - **`codespace rebuild dev-vm`**, observed from inside the result:
   - `${devcontainerId}` expands — `~/.claude` is the volume `claude-0rd4jj…`.
-  - `~/.claude` is writable by `vscode`.
+  - `~/.claude` is writable by `vscode`, and survives a second rebuild — the
+    same volume, credentials intact.
   - `nil` installs.
   - `devcontainer-lock.json` was not rewritten; the hand-resolved digests stand.
   - Claude Code's npm prefix is `vscode`-owned, so self-update can write.
   - The image is Ubuntu 26.04; the editor comes up and `git commit` signs (`G`).
   - The agent socket is at `/mnt/git-ssh/agent.sock` and `ssh-add -l` lists
     the key — without docker-in-docker, which is the case the move was for.
+- **The VM control socket**, from inside the dev-vm codespace: `/mnt/vm` holds
+  a root-owned client and a 0600 socket; `vm status` names the running system
+  and reads failed units; `vm journal code-server` answers and
+  `code-server-password` is refused; `vm build` built in ~10s warm and reported
+  no changes. The sandboxing broke nothing.
+- **`codespace ls --size` against the real daemon**, through `vm codespaces`:
+  IMAGE shows real per-container figures, so the daemon does compute
+  `SharedSize`.
 
 ### Pending a real run
 
@@ -83,29 +92,15 @@ no systemd, so none of it has run for real. `rebuild` on the VM, then
 - **The agent socket under docker-in-docker.** Confirmed at the new path in
   dev-vm; the case that motivated the move — a dind codespace, whose entrypoint
   hides `/tmp` — still wants a `codespace rebuild` and `ssh-add -l` inside.
-- **`codespace ls --size` reads the real daemon.** Built against the
-  docker-v29.7.2 API spec and a synthetic response only. Rows plus footer should
-  roughly match `docker system df` and `du -sxh /persist`; a `?` in IMAGE on
-  every row would mean the daemon does not compute `SharedSize` here.
 - **`rebuild` stops when nothing changed.** The first `rebuild` after pulling
   it still switches — it is what installs the change. A second should print
   `no changes: already running …` and exit without touching sudo. `--force`
   switches regardless; any nixos-rebuild argument skips the check.
-- **The VM control socket** (`modules/vm-control.nix`). Built, shellchecked,
-  and the protocol tested over a real socket under `socat`. The systemd half
-  has never run. After `rebuild` then `codespace rebuild dev-vm`, inside the
-  codespace:
-  - `vm status` names the running system and lists failed units — not "could
-    not ask systemd".
-  - `vm journal code-server` answers; `vm journal code-server-password` is
-    refused.
-  - `vm build` builds and either says "no changes" or prints a closure diff.
-    `ProtectSystem=strict` is the likeliest thing to break it: if nix or git
-    complains about a read-only path, that is where to look
-    (`journalctl -u 'vm-control@*'` on the VM).
-  - `vm codespaces` matches `codespace list --size` run on the VM.
-  - On the VM, `ls -l /run/vm-control` shows a root-owned directory with a
-    dev-owned 0600 socket.
+- **`~/.claude.json` survives a rebuild.** Claude Code's global config sits in
+  `$HOME`, outside the volume, so every rebuild lost it ("configuration file
+  not found"). `CLAUDE_CONFIG_DIR` in `devcontainer.json` moves it into
+  `~/.claude`; a copy was seeded there by hand. After the next
+  `codespace rebuild dev-vm`, Claude Code should start without that message.
 - **`codespace rm <name> --repo` deletes the recorded checkout.** A plain `rm`
   now leaves the path in `/persist/codespace/.removed/<name>`, so `--repo` can
   follow later; it refuses anything not directly under `/persist/repos`. A
