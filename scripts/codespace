@@ -279,7 +279,13 @@ cmd_up() {
       printf '{\n  "name": "%s",\n  "image": "%s"\n}\n' \
         "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu26.04}" > "$override"
     fi
-    args+=(--override-config "$override")
+    # --no-lockfile because the CLI places a feature lockfile beside the config
+    # it *would* have read — the checkout's .devcontainer/, not this override —
+    # and writes one by default whenever features are listed. With no
+    # .devcontainer/ there, `up` dies with ENOENT on devcontainer-lock.json;
+    # with one, it writes into a checkout this script promises not to touch.
+    # Only here: a repo's own config keeps its lockfile, as in real Codespaces.
+    args+=(--override-config "$override" --no-lockfile)
   fi
 
   # Git credentials inside the container (CLAUDE.md §8).

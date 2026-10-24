@@ -38,9 +38,8 @@ These were built from documentation and inspection only:
 - **Every systemd unit.** The Codespace had no systemd at all (PID 1 was
   `docker-init`). `code-server`, `code-server-password`, `codespace-proxy@`,
   `git-allowed-signers`, `git-identity-template`, `github-known-hosts` were all
-  verified by reading the generated unit files, never by running them. Those
-  the hub editor and a working codespace depend on have now run — see below —
-  but only on the happy path.
+  verified by reading the generated unit files, never by running them. All of
+  them have now run clean on the VM — see below — but only on the happy path.
 - **The editor proxy.** Every launcher test used a fake `sudo systemctl` that
   ran `socat` directly. It now serves a real editor; its behaviour under
   failure, restart and `reset-failed` is still unverified.
@@ -72,40 +71,39 @@ If you touch any of these, you can now test them properly rather than by proxy.
 - **`codespace ls --size` against the real daemon**, through `vm codespaces`:
   IMAGE shows real per-container figures, so the daemon does compute
   `SharedSize`.
+- **The tarball cache is reused.** Two rebuilds after the first download, the
+  cached `code-server-4.143.1` tarball still carries its original mtime while
+  the container's install is minutes old — the installer untarred it rather
+  than fetching again.
+- **`~/.claude.json` survives a rebuild** via `CLAUDE_CONFIG_DIR`: after
+  `codespace rebuild dev-vm`, Claude Code started without the "configuration
+  file not found" message, and the file is in `~/.claude`, not `$HOME`.
+- **The systemd units, on the happy path** (`vm unit …`): `git-allowed-signers`,
+  `git-identity-template` and `github-known-hosts` exit 0 at boot;
+  `codespace-gc.timer` fires daily and the sweep logs "nothing idle past 60d";
+  `code-server`, `docker` and `codespace-proxy@dev-vm` run. No failed units.
+- **`rebuild` stops when nothing changed:** a second `rebuild` printed
+  `no changes: already running …` and did not switch.
+- **docker-in-docker on a 24.04 image**, in a throwaway codespace: the feature
+  installed `iptables-legacy` as predicted, the launcher printed
+  `switching to iptables-nft` and `dockerd is up`, and `docker run --rm
+  hello-world` worked inside. The no-legacy-tables diagnosis is now observed,
+  not just read from the kernel config.
+- **The agent socket under docker-in-docker:** `SSH_AUTH_SOCK` is
+  `/mnt/git-ssh/agent.sock` and `ssh-add -l` lists the key, despite the
+  entrypoint's tmpfs over `/tmp`.
+- **A generated config with a feature** comes up — after the `--no-lockfile`
+  fix this test turned up (CLAUDE.md §8) — and nothing is written into the
+  checkout: no `.devcontainer/` appeared.
+- **`codespace rm <name> --volume`, then `--repo` later:** the dind volume was
+  removed and reported by name, the checkout path was noted in
+  `/persist/codespace/.removed/`, and the later `--repo` deleted exactly that
+  checkout.
 
 ### Pending a real run
 
-Work done from inside the flake's own codespace, which has no Docker socket and
-no systemd, so none of it has run for real. `rebuild` on the VM, then
-`codespace rebuild dev-vm`, tests most of it at once. Verified only by
-`nix build`, shellcheck, and stubbed or dry-run harnesses:
-
-- **The tarball cache is reused.** It is populated —
-  `code-server-4.143.1-linux-amd64.tar.gz` is in `/persist/codespace/cache` —
-  but reuse is unobserved. The next create of any codespace should print
-  `+ Reusing …` where the ~200 MB download used to be.
-- **docker-in-docker comes up** — needs a codespace whose config lists
-  `ghcr.io/devcontainers/features/docker-in-docker:2`, not `dev-vm`. On first
-  create `up` should print `switching to iptables-nft` then `dockerd is up`, and
-  `docker run --rm hello-world` inside should work. The diagnosis (no legacy
-  tables) is read from the kernel config, not observed.
-- **The agent socket under docker-in-docker.** Confirmed at the new path in
-  dev-vm; the case that motivated the move — a dind codespace, whose entrypoint
-  hides `/tmp` — still wants a `codespace rebuild` and `ssh-add -l` inside.
-- **`rebuild` stops when nothing changed.** The first `rebuild` after pulling
-  it still switches — it is what installs the change. A second should print
-  `no changes: already running …` and exit without touching sudo. `--force`
-  switches regardless; any nixos-rebuild argument skips the check.
-- **`~/.claude.json` survives a rebuild.** Claude Code's global config sits in
-  `$HOME`, outside the volume, so every rebuild lost it ("configuration file
-  not found"). `CLAUDE_CONFIG_DIR` in `devcontainer.json` moves it into
-  `~/.claude`; a copy was seeded there by hand. After the next
-  `codespace rebuild dev-vm`, Claude Code should start without that message.
-- **`codespace rm <name> --repo` deletes the recorded checkout.** A plain `rm`
-  now leaves the path in `/persist/codespace/.removed/<name>`, so `--repo` can
-  follow later; it refuses anything not directly under `/persist/repos`. A
-  codespace removed *before* this change has no note and falls back to
-  `/persist/repos/<name>` — look before using it on one of those.
+Nothing. Everything built from the Codespace has now run on the VM; what is
+still untested is listed under "never tested" above.
 
 ### Test scaffolding you no longer need
 
