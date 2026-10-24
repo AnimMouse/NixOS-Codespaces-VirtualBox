@@ -1094,6 +1094,26 @@ cmd_rm() {
     esac
   done
 
+  # Which checkout this codespace used, read before its state goes: the path it
+  # recorded at `up`, else the note an earlier `rm` left, else — only for a
+  # codespace removed before those notes existed — the conventional
+  # $REPOS/<name>. Deriving it from the name alone deleted the wrong directory
+  # when a codespace had been started from a path elsewhere and something else
+  # of the same name lived in $REPOS.
+  local ws=""
+  if [ -f "$STATE/$name/workspace" ]; then ws=$(cat "$STATE/$name/workspace")
+  elif [ -f "$REMOVED/$name" ]; then ws=$(cat "$REMOVED/$name")
+  elif [ -d "$REPOS/$name" ]; then ws="$REPOS/$name"; fi
+
+  # Refused here, before anything is touched. remove_checkout checks again at
+  # the end, but by then the container and its state would already be gone,
+  # leaving a half-done rm behind an error that reads as though nothing
+  # happened. `codespace rm dev-vm --repo` would have done that to the flake's
+  # own codespace, whose checkout is /persist/dev-vm.
+  if [ "$keep_repo" = 0 ] && [ -n "$ws" ] && [ -e "$ws" ] && ! under_repos "$ws"; then
+    die "not removing $name: --repo only deletes checkouts directly under $REPOS, and this one is $(realpath -e "$ws"). Nothing was changed. Drop --repo to remove just the codespace."
+  fi
+
   warn_ephemeral "$name"
   sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
 
@@ -1135,17 +1155,6 @@ cmd_rm() {
       note "kept volume $v — another container still references it"
     fi
   done
-
-  # Which checkout this codespace used, read before its state goes: the path it
-  # recorded at `up`, else the note an earlier `rm` left, else — only for a
-  # codespace removed before those notes existed — the conventional
-  # $REPOS/<name>. Deriving it from the name alone deleted the wrong directory
-  # when a codespace had been started from a path elsewhere and something else
-  # of the same name lived in $REPOS.
-  local ws=""
-  if [ -f "$STATE/$name/workspace" ]; then ws=$(cat "$STATE/$name/workspace")
-  elif [ -f "$REMOVED/$name" ]; then ws=$(cat "$REMOVED/$name")
-  elif [ -d "$REPOS/$name" ]; then ws="$REPOS/$name"; fi
 
   # Drops the port reservation and any generated devcontainer.json, so the next
   # `up` starts clean. The checkout is left alone unless asked: it is the one
