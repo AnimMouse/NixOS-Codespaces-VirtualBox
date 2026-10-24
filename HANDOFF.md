@@ -18,6 +18,7 @@ current. This file only covers what *changes* when the workbench moves.
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
+| Planned, not built | Scoped GitHub credentials per codespace — [docs/GITHUB-APP.md](docs/GITHUB-APP.md). Today every container can act as the whole account |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
 `/persist`, never in git. `paths.nix` records the locations and no values.
@@ -48,12 +49,12 @@ These were built from documentation and inspection only:
 
 If you touch any of these, you can now test them properly rather than by proxy.
 
-### Pending the next container rebuild
+### Pending a real run
 
-Work done from inside the flake's own codespace, which has no Docker socket, so
-none of it has been through a real container create. `codespace rebuild dev-vm`
-is the test for all of it at once. Verified only by `nix build`, shellcheck, and
-stubbed or dry-run harnesses:
+Work done from inside the flake's own codespace, which has no Docker socket and
+no systemd, so none of it has run for real. `rebuild` on the VM, then
+`codespace rebuild dev-vm`, tests most of it at once. Verified only by
+`nix build`, shellcheck, and stubbed or dry-run harnesses:
 
 - **`${devcontainerId}` expands.** `docker volume ls` should show a `claude-`
   volume with an id suffix, not a literal `${devcontainerId}`.
@@ -90,6 +91,15 @@ stubbed or dry-run harnesses:
   docker-v29.7.2 API spec and a synthetic response only. Rows plus footer should
   roughly match `docker system df` and `du -sxh /persist`; a `?` in IMAGE on
   every row would mean the daemon does not compute `SharedSize` here.
+- **`rebuild` stops when nothing changed.** The first `rebuild` after pulling
+  it still switches — it is what installs the change. A second should print
+  `no changes: already running …` and exit without touching sudo. `--force`
+  switches regardless; any nixos-rebuild argument skips the check.
+- **`codespace rm <name> --repo` deletes the recorded checkout.** A plain `rm`
+  now leaves the path in `/persist/codespace/.removed/<name>`, so `--repo` can
+  follow later; it refuses anything not directly under `/persist/repos`. A
+  codespace removed *before* this change has no note and falls back to
+  `/persist/repos/<name>` — look before using it on one of those.
 
 ### Test scaffolding you no longer need
 
@@ -198,12 +208,14 @@ typo and watching `SC2154` stop it.
   known_hosts                    github.com, scanned once
 /persist/codespace/
   config                         launcher settings (below)
+  .removed/<name>                checkout path a plain `rm` left, for a later `rm --repo`
   secrets                        KEY=value, mode 0600
   cache/                         shared download cache, bind-mounted in every
                                  container — the code-server tarball, once
   <name>/                        port, generated devcontainer.json, secrets, last_used
 /persist/code-server/pw          hub editor password, generated on first boot
-/persist/ssh/                    SSH *host* keys — the machine's identity
+/persist/ssh/                    SSH *host* keys — the machine's identity —
+                                 and authorized_keys.dev, read by sshd for key login
 /persist/secrets/                spare 0700 dir, root-owned (sudo to use it)
 /persist/docker/                 Docker data-root
 /persist/home/dev/               the dev user's home
@@ -230,6 +242,7 @@ typo and watching `SC2154` stop it.
 
 ```bash
 rebuild --pull                  # git pull, then nixos-rebuild switch
+rebuild [--force]               # stops at "no changes" unless forced
 ssh-auth                        # unlock the git key into the agent, once per boot
 
 codespace up <url|path|name>    # create/start a codespace and its editor
@@ -237,7 +250,7 @@ codespace new <name>            # the same, on an empty workspace
 codespace shell <name>          # a terminal inside it, in a tmux on the VM
 codespace rebuild <name>        # recreate the container, keep the port
 codespace down <name>           # stop it
-codespace rm <name> [opts]      # --repo drops the checkout, --volume its volumes
+codespace rm <name> [opts]      # --repo drops the checkout (also later), --volume its volumes (not later)
 codespace list                  # + IDLE, the clock gc is counting
 codespace list --size           # disk per codespace, and what is shared
 codespace logs <name>
@@ -300,3 +313,27 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
 - **`git config --global` does not work on the VM.** home-manager owns
   `~/.config/git/config` as a read-only store symlink. Use
   `git config -f /persist/git/identity …`.
+- **The base image is pinned, so moving it is a choice.** `base:ubuntu26.04` in
+  both the launcher default and this repo's own config — the bare `:ubuntu` tag
+  moved to 26.04 under us once. The 26.04 tag has **no hyphen**; `ubuntu-26.04`
+  is a 404. A codespace with an already-generated config keeps whatever image
+  it names until you edit `/persist/codespace/<name>/devcontainer.json`.
+- **docker-in-docker on 26.04 needs `"moby": false`.** The feature hard-refuses
+  its default on `resolute`; `moby: false` installs Docker CE instead, and on
+  26.04 the feature already picks nft, so the launcher's iptables fix does
+  nothing there. That fix still matters for a project on a 24.04 image.
+- **Claude Code's npm package lands root-owned.** Features install as root, so
+  any project using the claude-code feature needs the second chown this repo's
+  `postCreateCommand` carries, or auto-update fails with "no write permission
+  to npm prefix".
+- **Disk.** `codespace ls --size` first; README "Disk space" has the cleanup
+  order and how to grow `persist.vdi`. Every container layer measured 1.1 GB or
+  more even barely used — possibly each one's own copy of code-server.
+  Unmeasured; if confirmed, running it from the shared cache mount would make
+  one copy serve all.
+- **Host RAM** is not returned by VirtualBox on its own. Save the machine state
+  rather than shutting down; README "Host memory" has the balloon and sizing
+  options.
+- **Key login works** and survives reinstalls via
+  `/persist/ssh/authorized_keys.dev`; password login stays on deliberately.
+  README setup step 2 and BOOTSTRAP step 7.

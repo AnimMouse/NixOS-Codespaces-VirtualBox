@@ -575,6 +575,31 @@ Expect `df` to show a little under the disk size — about 98G for 100 GB, the
 rest being filesystem overhead — and Avail to fall a further 5% short of
 Size minus Used: ext4 reserves that for root.
 
+## Host memory
+
+VirtualBox commits host RAM the first time the guest touches a page and does
+not hand it back, and Linux fills idle RAM with page cache — so after a few
+image builds the VM holds its whole allocation on Windows even when idle.
+Dropping caches inside the guest does not help; the host never sees it.
+
+- **Save the state instead of shutting down** — Close → *Save the machine
+  state*. Every byte goes back to Windows at once, and starting it again
+  resumes exactly there: codespaces still running, editors reconnect on reload,
+  no `codespace up`. Costs a file the size of the VM's RAM.
+- **Inflate the balloon** to lend some back while it runs. The guest additions
+  are already enabled in `configuration.nix`; this is host-side and has no GUI:
+  ```powershell
+  VBoxManage controlvm <vm-name> guestmemoryballoon 4096   # 4 GB back to Windows
+  VBoxManage controlvm <vm-name> guestmemoryballoon 0      # return it to the guest
+  ```
+  Manual, gone on the next VM start, and the guest really has that much less —
+  a big build can run out of memory while it is inflated.
+- **Give it less to begin with** — Settings → System → Base Memory caps what it
+  can ever take. 6 GB is plenty if you rarely build large images.
+
+Documented VirtualBox behaviour, not yet tried on this setup — check that the
+balloon command works on your VirtualBox build before relying on it.
+
 ---
 
 # How the pieces fit
