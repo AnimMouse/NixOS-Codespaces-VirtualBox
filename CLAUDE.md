@@ -125,12 +125,15 @@ modules/
 ├── docker.nix                 # Docker + devcontainer CLI
 ├── code-server.nix            # hub editor + first-boot password generation
 ├── codespace.nix              # launcher package + editor proxy unit
+├── vm-control.nix             # read-only control socket for the flake's codespace
 └── home.nix                   # home-manager wiring + git identity units
 home/dev.nix                   # home-manager: VM-layer dotfiles
 scripts/
 ├── codespace                  # launcher: up / new / rebuild / down / rm / list / logs
 ├── rebuild                    # rebuild [--pull] [--force]
 ├── ssh-auth                   # unlock the git key into the agent
+├── vm-control                 # VM side of the control socket, one verb per request
+├── vm                         # container side: plain sh + curl
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
 docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials

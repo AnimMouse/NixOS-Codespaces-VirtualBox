@@ -1,0 +1,178 @@
+# vm-control — answers one request from a codespace, then exits.
+#
+# Started by systemd once per connection on /run/vm-control/control.sock
+# (modules/vm-control.nix), with the socket as stdin and stdout. The client is
+# scripts/vm, which speaks to it with `curl --unix-socket`: curl is already a
+# hard dependency of every codespace (the code-server install runs it), so a
+# minimal HTTP framing costs nothing on the container side, where socat and nc
+# are not guaranteed.
+#
+# The verbs are a fixed list, and nothing the client sends reaches a shell or
+# a command line unvalidated. None of them changes the running system: applying
+# stays `rebuild` on the VM. The reason is that a codespace with this socket can
+# also write @FLAKE_DIR@, so one that could switch would be root on the VM.
+#
+# Built by modules/vm-control.nix with pkgs.writeShellApplication.
+
+FLAKE_DIR=@FLAKE_DIR@
+FLAKE_ATTR=@FLAKE_ATTR@
+TOPLEVEL="$FLAKE_DIR#nixosConfigurations.$FLAKE_ATTR.config.system.build.toplevel"
+
+# Units whose status and journal a codespace may read. An allowlist, because
+# the journal is not harmless: code-server-password prints the hub editor's
+# password there on first boot, and the hub editor is a shell with sudo.
+allowed_unit() {
+  case "$1" in
+    code-server-password*) return 1 ;;
+    code-server|code-server.service) ;;
+    codespace-proxy@*|codespace-gc|codespace-gc.service|codespace-gc.timer) ;;
+    git-allowed-signers*|git-identity-template*|github-known-hosts*) ;;
+    docker|docker.service|docker.socket) ;;
+    sshd|sshd.service|nix-daemon|nix-daemon.service|nix-gc*|nix-optimise*) ;;
+    vm-control.socket|vm-control@*) ;;
+    *) return 1 ;;
+  esac
+}
+
+usage() {
+  cat <<'USAGE'
+vm — ask the VM about itself, from inside a codespace
+
+  vm status               running and booted system, checkout, failed units
+  vm unit <unit>          systemctl status
+  vm journal <unit> [n]   the last n lines of its journal (default 50)
+  vm codespaces           codespace list --size
+  vm volumes              docker volume ls
+  vm df                   disk usage: filesystems, then docker's own view
+
+  vm build                build the checkout with the VM's store, and say
+                          what would change against the running system
+  vm check                nix flake check on the checkout
+
+Nothing here applies a change. On the VM: rebuild
+USAGE
+}
+
+cmd_status() {
+  local running booted
+  running=$(readlink -f /run/current-system)
+  booted=$(readlink -f /run/booted-system)
+  echo "host:     $(cat /proc/sys/kernel/hostname)  up $(cut -d. -f1 /proc/uptime | awk '{ printf "%dd %dh %dm", $1/86400, $1%86400/3600, $1%3600/60 }')"
+  echo "nixos:    $(cat /run/current-system/nixos-version)"
+  echo "running:  $running"
+  if [ "$running" != "$booted" ]; then
+    echo "booted:   $booted  (differs — a reboot would change the kernel or initrd)"
+  fi
+  echo "checkout: $FLAKE_DIR at $(git -C "$FLAKE_DIR" log -1 --format='%h %s')"
+  local dirty
+  dirty=$(git -C "$FLAKE_DIR" --no-optional-locks status --porcelain | wc -l)
+  [ "$dirty" -gt 0 ] && echo "          $dirty uncommitted change(s)"
+  echo
+  local failed
+  if ! failed=$(systemctl --failed --no-legend --plain | awk '{ print $1 }'); then
+    echo "failed units: could not ask systemd"
+  elif [ -n "$failed" ]; then
+    echo "failed units:"
+    awk '{ print "  " $0 }' <<<"$failed"
+  else
+    echo "failed units: none"
+  fi
+  echo
+  echo "(vm build to compare the checkout against the running system)"
+}
+
+cmd_build() {
+  local new running
+  running=$(readlink -f /run/current-system)
+  echo "==> building $TOPLEVEL"
+  # The same flake reference `rebuild` uses, so "no changes" here means no
+  # changes there. accept-flake-config off and the lock file left alone: the
+  # checkout is writable from the codespace asking, and neither a nixConfig in
+  # it nor this build should get to change anything on the VM.
+  new=$(nix build --no-link --print-out-paths -L \
+    --no-write-lock-file --option accept-flake-config false \
+    "$TOPLEVEL") || return
+  echo "==> built $new"
+  if [ "$new" = "$running" ]; then
+    echo "==> no changes: identical to the running system"
+    return
+  fi
+  echo "==> differs from the running system:"
+  nix store diff-closures "$running" "$new"
+  echo
+  echo "==> apply on the VM with: rebuild"
+}
+
+cmd_check() {
+  echo "==> nix flake check $FLAKE_DIR"
+  nix flake check -L --no-write-lock-file --option accept-flake-config false "$FLAKE_DIR"
+}
+
+dispatch() {
+  local verb="${1:-help}"
+  none() { [ "$1" -eq 0 ] || { echo "vm: '$verb' takes no arguments"; return 2; }; }
+  [ $# -gt 0 ] && shift
+  case "$verb" in
+    help) usage ;;
+    status) none $# && cmd_status ;;
+    unit)
+      [ $# -eq 1 ] || { echo "usage: vm unit <unit>"; return 2; }
+      allowed_unit "$1" || { echo "vm: '$1' is not on the list of readable units"; return 2; }
+      # Exit 3 is "inactive", not a failure of the question.
+      systemctl status --no-pager "$1" || [ $? -eq 3 ]
+      ;;
+    journal)
+      [ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: vm journal <unit> [lines]"; return 2; }
+      allowed_unit "$1" || { echo "vm: '$1' is not on the list of readable units"; return 2; }
+      local n="${2:-50}"
+      case "$n" in ''|*[!0-9]*) echo "vm: lines must be a number"; return 2 ;; esac
+      journalctl --no-pager -u "$1" -n "$n"
+      ;;
+    # The VM's own launcher, the one you run there, rather than a copy built
+    # into this script.
+    codespaces) none $# && /run/current-system/sw/bin/codespace list --size ;;
+    volumes) none $# && docker volume ls ;;
+    df) none $# && { df -h / /persist /nix; echo; docker system df; } ;;
+    build) none $# && cmd_build ;;
+    check) none $# && cmd_check ;;
+    *) echo "vm: unknown command '$verb'"; echo; usage; return 2 ;;
+  esac
+}
+
+# ---- the request ----------------------------------------------------------
+# One request line, then headers to a blank line. Timeouts so a client that
+# connects and says nothing does not hold an instance open.
+IFS= read -r -t 10 line || exit 0
+line=${line%$'\r'}
+while IFS= read -r -t 10 header; do
+  [ -z "${header%$'\r'}" ] && break
+done
+
+read -r method target _ <<<"$line"
+
+printf 'HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n'
+
+# Always 200: the command's own exit status travels in a trailer line the
+# client strips, because a status line has to be sent before the command runs.
+finish() { printf '@@vm-exit %d\n' "$1"; exit 0; }
+
+if [ "$method" != GET ]; then
+  echo "vm: only GET"
+  finish 2
+fi
+# Path segments are the arguments. Anything outside this set is refused here,
+# before it can be a flag, a glob or a path.
+target=${target#/}
+case "$target" in
+  *[!A-Za-z0-9@._/-]*|-*|*/-*|*..*) echo "vm: refusing '$target'"; finish 2 ;;
+esac
+IFS=/ read -r -a argv <<<"$target"
+
+# awk ends the output with a newline if the command did not, so the trailer
+# always starts a line of its own. fflush keeps it streaming: a build's log
+# should arrive as it happens, not at the end.
+set +e
+dispatch "${argv[@]}" 2>&1 | awk '{ print; fflush() }'
+rc=${PIPESTATUS[0]}
+set -e
+finish "$rc"

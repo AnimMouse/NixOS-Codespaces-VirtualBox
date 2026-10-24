@@ -1,0 +1,41 @@
+#!/bin/sh
+# vm — ask the VM about itself, from inside a codespace.
+#
+#   vm help      what it can answer
+#
+# Talks to scripts/vm-control on the VM through the socket the launcher mounts
+# at /mnt/vm. Plain sh plus curl, because this runs in whatever image the
+# codespace uses: curl is already required there by the code-server install,
+# and nothing else is assumed. The VM copies this file into the mounted
+# directory, so a VM rebuild updates it in every container at once.
+
+sock=/mnt/vm/control.sock
+if [ ! -S "$sock" ]; then
+  echo "vm: no control socket at $sock" >&2
+  echo "    This codespace was not given one. On the VM: set VM_CONTROL in" >&2
+  echo "    /persist/codespace/config if needed, then codespace rebuild <name>." >&2
+  exit 1
+fi
+
+path=help
+if [ $# -gt 0 ]; then
+  path=$1
+  shift
+  for arg in "$@"; do path="$path/$arg"; done
+fi
+# The server refuses the same set; checked here too so the message is about
+# the argument, not a curl complaint about the URL it would have made.
+case "$path" in
+  *[!A-Za-z0-9@._/-]*) echo "vm: arguments may only contain letters, digits and @._-" >&2; exit 2 ;;
+esac
+
+# The server always answers 200 and sends the command's exit status as a last
+# line of its own; awk passes everything else through as it arrives — a build
+# streams — and exits with that status.
+curl -sSN --path-as-is --unix-socket "$sock" "http://vm/$path" | awk '
+  /^@@vm-exit [0-9]+$/ { rc = $2; done = 1; next }
+  { print; fflush() }
+  END {
+    if (!done) { print "vm: the connection closed before the command finished" > "/dev/stderr"; exit 1 }
+    exit rc
+  }'

@@ -787,13 +787,16 @@ modules/
   docker.nix                    Docker, data-root on /persist, autoprune
   code-server.nix               hub editor + first-boot password
   codespace.nix                 launcher package + editor proxy unit
+  vm-control.nix                read-only control socket for the flake's codespace
   home.nix                      home-manager wiring + git identity units
-home/dev.nix                    VM dotfiles: git, ssh, gh, bash, tmux
   tools.nix                     the `rebuild` and `ssh-auth` commands
+home/dev.nix                    VM dotfiles: git, ssh, gh, bash, tmux
 paths.nix                       where identity and key material live (paths only)
 scripts/codespace               the launcher
 scripts/rebuild                 rebuild [--pull] [--force]
 scripts/ssh-auth                unlock the git key into the agent
+scripts/vm-control              VM side of the control socket
+scripts/vm                      container side: `vm status`, `vm build`, …
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 docs/BOOTSTRAP.md               full install walkthrough
 docs/GITHUB-APP.md              plan: scoped GitHub credentials per codespace
@@ -869,6 +872,26 @@ nixpkgs. The workspace is the checkout the system rebuilds from, so verify in
 the container and then `rebuild` on the VM — no push-and-pull round trip.
 
 The container cannot apply: `nixos-rebuild switch` needs root on the VM.
+
+### Asking the VM from the codespace
+
+The codespace on this checkout gets a control socket at `/mnt/vm`, and `vm` on
+its PATH:
+
+```bash
+vm status                  # running vs booted system, checkout, failed units
+vm journal code-server     # also: vm unit <unit>; a fixed list of units
+vm codespaces              # codespace list --size
+vm build                   # build with the VM's store; diff against running
+```
+
+`vm help` lists the rest. Nothing it offers changes the system — the codespace
+can write the flake, so one that could also switch would be root on the VM.
+Applying stays `rebuild`, on the VM.
+
+Which codespaces get it is `VM_CONTROL` in `/persist/codespace/config`: unset,
+only the one on `/persist/dev-vm`; a list of names, those; empty, none. Like any
+mount, it arrives on create — `codespace rebuild <name>` after changing it.
 
 ## Checking a change without a VM
 

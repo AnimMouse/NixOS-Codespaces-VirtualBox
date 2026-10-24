@@ -30,7 +30,10 @@ let
   codespace = pkgs.writeShellApplication {
     name = "codespace";
     runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused ];
-    text = builtins.readFile ../scripts/codespace;
+    # The flake's checkout, so the launcher can tell which codespace is the
+    # one editing this machine — the default for VM_CONTROL.
+    text = builtins.replaceStrings [ "@FLAKE_DIR@" ] [ (import ../paths.nix).flakeDir ]
+      (builtins.readFile ../scripts/codespace);
   };
 in
 {

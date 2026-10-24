@@ -30,6 +30,12 @@ REMOVED=$STATE/.removed
 # which is container layer and so dies on every rebuild. See cmd_up.
 CACHE=/persist/codespace/cache
 CONTAINER_CACHE=/var/cache/codespace
+# The VM control socket's directory (modules/vm-control.nix), and where it
+# appears in a container. Plumbing, so under /mnt beside /mnt/git-ssh.
+VM_CONTROL_DIR=/run/vm-control
+CONTAINER_VM=/mnt/vm
+# This VM's own flake checkout: its codespace gets the control socket by default.
+FLAKE_DIR=@FLAKE_DIR@
 PW_FILE=/persist/code-server/pw
 EDITOR_PORT=8080
 # Real Codespaces deletes a codespace after 30 days of inactivity. Same default
@@ -152,6 +158,25 @@ allocate_port() {
     fi
   done
   die "all ports $PORT_MIN-$PORT_MAX are taken; 'codespace list' then 'codespace down' one"
+}
+
+# Whether codespace $1, on workspace $2, gets the VM control socket.
+# VM_CONTROL in the config is a space-separated list of codespace names. Unset,
+# it means only the codespace on this VM's own flake checkout — the one place
+# where asking the VM is the work. Set and empty, nobody. Matched by checkout
+# rather than by the name `dev-vm`, which any repo of that name would share.
+vm_control_for() {
+  if [ -z "${VM_CONTROL+set}" ]; then
+    [ "$2" = "$FLAKE_DIR" ]
+    return
+  fi
+  local -a names
+  read -r -a names <<<"$VM_CONTROL"
+  local n
+  for n in "${names[@]}"; do
+    [ "$n" = "$1" ] && return 0
+  done
+  return 1
 }
 
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
@@ -410,6 +435,20 @@ cmd_up() {
   mkdir -p "$CACHE"
   args+=(--mount "type=bind,source=$CACHE,target=$CONTAINER_CACHE")
 
+  # The VM control socket: read-only questions about the VM, and builds in its
+  # store, for the codespaces allowed them (vm_control_for). The directory, not
+  # the socket, so a restart of the socket unit does not strand the container
+  # on a dead inode. Only takes effect on create, like every mount here.
+  local want_vm=0
+  if vm_control_for "$name" "$ws"; then
+    want_vm=1
+    if [ -S "$VM_CONTROL_DIR/control.sock" ]; then
+      args+=(--mount "type=bind,source=$VM_CONTROL_DIR,target=$CONTAINER_VM")
+    else
+      note "warning: no VM control socket at $VM_CONTROL_DIR — is modules/vm-control.nix applied? Continuing without it."
+    fi
+  fi
+
   # The dotfiles clone runs *inside* the container, before anything this script
   # writes there exists — so a private dotfiles repo over https fails with
   # "could not read Username", and `up` still reports success, leaving the
@@ -475,6 +514,20 @@ cmd_up() {
   if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != locked ]; then
     note "note: this container was created with git credentials '$git_ssh:-none';"
     note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
+  fi
+
+  # The client lives in the mounted directory, so a VM rebuild updates it in
+  # every container; the link puts it on PATH. Recreated on every `up`, since
+  # /usr/local/bin is container layer.
+  local have_vm=0
+  case " $mounts " in
+    *" $CONTAINER_VM "*)
+      have_vm=1
+      docker exec -u root "$cid" ln -sfn "$CONTAINER_VM/vm" /usr/local/bin/vm
+      ;;
+  esac
+  if [ "$want_vm" = 1 ] && [ "$have_vm" = 0 ] && [ -S "$VM_CONTROL_DIR/control.sock" ]; then
+    note "note: this container predates the VM control socket — 'codespace rebuild $name' to add it"
   fi
 
   # Installed after every `up`, not baked in as a feature: no third-party
@@ -754,6 +807,7 @@ cmd_up() {
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
   [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
   [ -n "$gh_token" ] && echo "  gh:  authenticated with the VM's token"
+  [ "$have_vm" = 1 ] && echo "  vm:  control socket mounted — 'vm help' inside"
   [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
   echo
   echo "  F1 opens the command palette. Ctrl+Shift+P is a Firefox private window."

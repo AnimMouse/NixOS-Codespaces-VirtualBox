@@ -37,17 +37,31 @@ These were built from documentation and inspection only:
 - **Every systemd unit.** The Codespace had no systemd at all (PID 1 was
   `docker-init`). `code-server`, `code-server-password`, `codespace-proxy@`,
   `git-allowed-signers`, `git-identity-template`, `github-known-hosts` were all
-  verified by reading the generated unit files, never by running them.
+  verified by reading the generated unit files, never by running them. Those
+  the hub editor and a working codespace depend on have now run — see below —
+  but only on the happy path.
 - **The editor proxy.** Every launcher test used a fake `sudo systemctl` that
-  ran `socat` directly. The real template unit's behaviour under failure,
-  restart and `reset-failed` is unverified.
-- **The hub editor** on port 8000, and `services.code-server` as a whole.
+  ran `socat` directly. It now serves a real editor; its behaviour under
+  failure, restart and `reset-failed` is still unverified.
 - **The Windows side:** `scripts/codespace-kiosk.ps1` parses under pwsh and its
   URL resolution is tested, but it has never launched Firefox.
-- **`ssh-auth` against the real user ssh-agent** (`services.ssh-agent` +
-  lingering). Only its no-key / no-agent / already-loaded branches were tested.
 
 If you touch any of these, you can now test them properly rather than by proxy.
+
+### Verified on the VM
+
+- **The hub editor** on port 8000, and `services.code-server` with it.
+- **`ssh-auth` against the real user ssh-agent** (`services.ssh-agent` +
+  lingering): the key loads, and containers see it through the forwarded socket.
+- **`codespace rebuild dev-vm`**, observed from inside the result:
+  - `${devcontainerId}` expands — `~/.claude` is the volume `claude-0rd4jj…`.
+  - `~/.claude` is writable by `vscode`.
+  - `nil` installs.
+  - `devcontainer-lock.json` was not rewritten; the hand-resolved digests stand.
+  - Claude Code's npm prefix is `vscode`-owned, so self-update can write.
+  - The image is Ubuntu 26.04; the editor comes up and `git commit` signs (`G`).
+  - The agent socket is at `/mnt/git-ssh/agent.sock` and `ssh-add -l` lists
+    the key — without docker-in-docker, which is the case the move was for.
 
 ### Pending a real run
 
@@ -56,37 +70,18 @@ no systemd, so none of it has run for real. `rebuild` on the VM, then
 `codespace rebuild dev-vm`, tests most of it at once. Verified only by
 `nix build`, shellcheck, and stubbed or dry-run harnesses:
 
-- **`${devcontainerId}` expands.** `docker volume ls` should show a `claude-`
-  volume with an id suffix, not a literal `${devcontainerId}`.
-- **`~/.claude` comes up writable.** Docker creates that mount point root-owned
-  because the path is absent from the image — the chown leading
-  `postCreateCommand` is what fixes it.
-- **The tarball cache is used.** Second create onward, `up` should print
+- **The tarball cache is reused.** It is populated —
+  `code-server-4.143.1-linux-amd64.tar.gz` is in `/persist/codespace/cache` —
+  but reuse is unobserved. The next create of any codespace should print
   `+ Reusing …` where the ~200 MB download used to be.
-- **`nil` installs**, so `postCreateCommand` output ends with a version line.
-- **`devcontainer-lock.json`** may be rewritten by the CLI with its own digests
-  for node and claude-code. Commit whatever it produces over the hand-resolved
-  ones.
-- **The first rebuild still loses `~/.claude`** — the volume is created empty,
-  so persistence starts from the rebuild after. Expect one more login.
 - **docker-in-docker comes up** — needs a codespace whose config lists
   `ghcr.io/devcontainers/features/docker-in-docker:2`, not `dev-vm`. On first
   create `up` should print `switching to iptables-nft` then `dockerd is up`, and
   `docker run --rm hello-world` inside should work. The diagnosis (no legacy
   tables) is read from the kernel config, not observed.
-- **The agent socket moved to `/mnt/git-ssh/agent.sock`.** An existing
-  codespace keeps `/tmp/ssh-agent.sock` on a plain `up`, and `ssh-add -l`
-  inside should still list the key; after `codespace rebuild` it should list it
-  from the new path, including in a codespace with docker-in-docker.
-- **Claude Code can update itself.** `ls -ld "$(npm prefix -g)/lib/node_modules/@anthropic-ai"`
-  should show `vscode`, not `root`, and `claude update` should run without
-  "no write permission to npm prefix".
-- **dev-vm on Ubuntu 26.04.** The image moved from `ubuntu-24.04` to
-  `ubuntu26.04`, which brings uutils in place of GNU coreutils. After
-  `codespace rebuild dev-vm`: `postCreateCommand` ends with the `nil` version
-  line, the editor comes up, and `git commit` still signs. The volumes should
-  need nothing — vscode is uid 1000 in both images. To back out, restore the
-  old tag and rebuild.
+- **The agent socket under docker-in-docker.** Confirmed at the new path in
+  dev-vm; the case that motivated the move — a dind codespace, whose entrypoint
+  hides `/tmp` — still wants a `codespace rebuild` and `ssh-add -l` inside.
 - **`codespace ls --size` reads the real daemon.** Built against the
   docker-v29.7.2 API spec and a synthetic response only. Rows plus footer should
   roughly match `docker system df` and `du -sxh /persist`; a `?` in IMAGE on
@@ -95,6 +90,21 @@ no systemd, so none of it has run for real. `rebuild` on the VM, then
   it still switches — it is what installs the change. A second should print
   `no changes: already running …` and exit without touching sudo. `--force`
   switches regardless; any nixos-rebuild argument skips the check.
+- **The VM control socket** (`modules/vm-control.nix`). Built, shellchecked,
+  and the protocol tested over a real socket under `socat`. The systemd half
+  has never run. After `rebuild` then `codespace rebuild dev-vm`, inside the
+  codespace:
+  - `vm status` names the running system and lists failed units — not "could
+    not ask systemd".
+  - `vm journal code-server` answers; `vm journal code-server-password` is
+    refused.
+  - `vm build` builds and either says "no changes" or prints a closure diff.
+    `ProtectSystem=strict` is the likeliest thing to break it: if nix or git
+    complains about a read-only path, that is where to look
+    (`journalctl -u 'vm-control@*'` on the VM).
+  - `vm codespaces` matches `codespace list --size` run on the VM.
+  - On the VM, `ls -l /run/vm-control` shows a root-owned directory with a
+    dev-owned 0600 socket.
 - **`codespace rm <name> --repo` deletes the recorded checkout.** A plain `rm`
   now leaves the path in `/persist/codespace/.removed/<name>`, so `--repo` can
   follow later; it refuses anything not directly under `/persist/repos`. A
@@ -161,10 +171,16 @@ the loop is:
 # in the codespace terminal — edit, then verify
 nix flake check
 nix build .#nixosConfigurations.dev.config.system.build.toplevel --no-link
+vm build        # the same build in the VM's store, diffed against what runs
 
 # on the VM — apply what you just verified
 rebuild
 ```
+
+`vm` is the codespace's window onto the VM (`modules/vm-control.nix`): status,
+allowlisted journals, `codespace list --size`, and builds. Read-only on
+purpose. This codespace can write the checkout, so a socket that could also
+switch would make it root on the VM. `vm help` lists the verbs.
 
 `rebuild` without `--pull`, because the codespace edited that checkout directly.
 
@@ -234,6 +250,7 @@ typo and watching `SC2154` stop it.
 | `APT_MIRROR` | — | rewrite apt sources in containers |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
 | `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Takes effect on `codespace rebuild` |
+| `VM_CONTROL` | the flake's codespace | names that get the VM control socket (below); empty for none. Takes effect on `codespace rebuild` |
 | `TIMEZONE` | the VM's own | zone for every container, e.g. `Asia/Manila`. On `/persist` so it need not be committed — see below |
 
 ---

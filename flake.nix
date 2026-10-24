@@ -40,6 +40,7 @@
           ./modules/docker.nix
           ./modules/code-server.nix
           ./modules/codespace.nix
+          ./modules/vm-control.nix
           ./modules/home.nix
           ./modules/tools.nix
         ];
