@@ -1,0 +1,51 @@
+#!/bin/sh
+# gh-codespace — gh inside a codespace, with a fresh scoped token every run.
+#
+# gh reads its token once, when it starts, and a token is good for 8 hours — so
+# one left in the environment goes stale under a long-lived codespace. With
+# GITHUB_AUTH=app the launcher links /usr/local/bin/gh to this, ahead of the
+# real gh on PATH; it asks the VM's token broker for a token scoped to this
+# codespace's repository, then runs the real gh with it (docs/GITHUB-APP.md).
+#
+# As GITHUB_TOKEN, as real Codespaces sets it. GH_TOKEN outranks it in gh and
+# is yours: `export GH_TOKEN=<a PAT>` for more than the codespace's own
+# repository, and this leaves it alone — it does not even ask the broker.
+#
+# If no token comes back it says why and runs gh anyway: `gh --version` and
+# `gh help` need none, and gh's own error is clearer than refusing outright.
+#
+# Plain sh plus curl, because it runs in whatever image the codespace uses.
+
+# The real gh: the first on PATH that is not this script.
+real=""
+oldifs=$IFS
+IFS=:
+for d in $PATH; do
+  [ -x "$d/gh" ] || continue
+  [ "$d/gh" -ef "$0" ] && continue
+  real="$d/gh"
+  break
+done
+IFS=$oldifs
+if [ -z "$real" ]; then
+  echo "gh-codespace: gh is not installed in this container" >&2
+  exit 127
+fi
+
+sock=/mnt/github/token.sock
+if [ -n "${GH_TOKEN:-}" ]; then
+  : # your override; gh will use it and ignore GITHUB_TOKEN anyway
+elif [ -S "$sock" ]; then
+  out=$(curl -sS --unix-socket "$sock" -w '\n%{http_code}' http://vm/token 2>&1)
+  code=$(printf '%s\n' "$out" | tail -n 1)
+  body=$(printf '%s\n' "$out" | sed '$d')
+  if [ "$code" = 200 ] && [ -n "$body" ]; then
+    GITHUB_TOKEN=$body
+    export GITHUB_TOKEN
+  else
+    echo "gh-codespace: the VM gave no token (HTTP $code):" >&2
+    printf '%s\n' "$body" | sed 's/^/  /' >&2
+  fi
+fi
+
+exec "$real" "$@"

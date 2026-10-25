@@ -278,7 +278,20 @@ so nothing in the container could sign — went through the client (`GIT_TRACE`
 shows it run), was logged by the service against the container's ID, and
 shows **Verified** on GitHub.
 
-### 4.5 The rest of the container side
+### 4.5 The rest of the container side — built
+
+`scripts/git-credential-codespace` and `scripts/gh-codespace`, copied into
+`/run/codespace-auth` and so present at `/mnt/github` in every container; the
+launcher wires them in when `GITHUB_AUTH=app`. *Checked*: the github-cli
+feature's real gh is found behind the shim by walking `PATH` and skipping the
+shim itself (`-ef`, which dash supports), so its install path does not need
+hard-coding. A container from before the switch keeps the SSH credential it
+was created with — mounts are fixed — and `up` warns until it is rebuilt.
+
+*Found while testing*: with no helper answering, git falls back to
+`GIT_ASKPASS`, which code-server sets to its own prompt — so in an editor
+terminal a broker failure shows as a password box, not an error. The helper
+prints the broker's reason to stderr first.
 
 - **git**: a credential helper, `/usr/local/bin/git-credential-codespace`, set
   in the *system* git config as `credential.https://github.com.helper`, for the
@@ -291,15 +304,23 @@ shows **Verified** on GitHub.
   `url."https://github.com/".insteadOf` for both `git@github.com:` and
   `ssh://git@github.com/`, replacing today's rewrite in the other direction.
   The VM and the checkout's own `.git/config` are untouched.
-- **gh**: reads `GH_TOKEN` once, at start, so a token in the environment goes
+- **gh**: reads its token once, at start, so a token in the environment goes
   stale after 8 hours. A shim at `/usr/local/bin/gh` — ahead of the feature's
-  `/usr/bin/gh` on `PATH` — fetches a fresh token and `exec`s the real one.
+  `/usr/bin/gh` on `PATH` — fetches a fresh token as `GITHUB_TOKEN` and `exec`s
+  the real one. Real Codespaces has no shim, only the environment variable; a
+  long-lived process here, such as a Claude Code session whose shell
+  environment is captured at its start, would otherwise hold a dead token.
   **Verify** the github-cli feature's install path on both 24.04 and 26.04
   images.
-- **`GH_TOKEN` in `~/.codespace-secrets`**: kept, but filled from the broker at
-  `up` instead of the VM's account-wide `gh auth token`. Tools that read the
-  variable once get a scoped token that may lapse; that is a strict improvement
-  on an account-wide one that does not.
+- **`GITHUB_TOKEN` in `~/.codespace-secrets`**, filled from the broker at
+  `up` instead of the VM's account-wide `gh auth token` — and renamed from
+  `GH_TOKEN`, in both modes. `GITHUB_TOKEN` is what real Codespaces sets;
+  `GH_TOKEN` outranks it in gh and is left to you, so `export GH_TOKEN=<a PAT>`
+  lifts a codespace beyond its repository exactly as in a real Codespace. The
+  credential helper honours `GH_TOKEN` too, so git and gh never disagree, and
+  the shim does not ask the broker while it is set. Tools that read
+  `GITHUB_TOKEN` once get a scoped token that may lapse after 8 hours; a new
+  shell, `gh auth token`, or the next `up` gives a fresh one.
 - **Removed from containers**: the forwarded agent, keyfile mode, the
   private key in every form, the https→ssh rewrite, and `GIT_SSH_COMMAND`.
   `/mnt/git-ssh` keeps the public key, identity, `allowed_signers` and
@@ -370,7 +391,8 @@ Each phase ships on its own and leaves the system working.
 2. **App and broker on the VM.** Register the app (done), `github-app-login`
    (built, run), the broker (built). Checked by hand with `curl --unix-socket`: a scoped token pushes to
    its repo and is refused by another. Containers still untouched.
-3. **Containers switch — the hole closes here.** In one step: stop forwarding
+3. **Containers switch — the hole closes here. Built, behind
+   `GITHUB_AUTH=app`.** In one step: stop forwarding
    the agent and drop keyfile mode, add the credential helper and `gh` shim,
    fill `GH_TOKEN` from the broker, and flip the remote rewrite to https. (The
    dotfiles change already shipped with phase 1.) These cannot be split: taking the agent away before the

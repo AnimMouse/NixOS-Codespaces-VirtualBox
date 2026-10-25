@@ -423,7 +423,7 @@ codespace shell project          # you are now inside the container
 ```
 
 It lands as the container's own user, in the workspace folder, with the same
-git identity, `GH_TOKEN` and SSH access the editor's terminals get.
+git identity, `GITHUB_TOKEN` and git access the editor's terminals get.
 
 **It runs inside a tmux session on the VM** (`cs-<name>`), so dropping your SSH
 connection does not kill what you were running — reconnect and
@@ -701,6 +701,33 @@ all work with **no passphrase prompt** — the crypto happens back on the VM.
 Signing works because `user.signingkey` is the *public* key, and `ssh-keygen -Y
 sign` will use the agent when the private half is unreadable.
 
+**No SSH credential in containers at all** — `GITHUB_AUTH=app` in
+`/persist/codespace/config` (after the GitHub App setup in
+[docs/GITHUB-APP.md](docs/GITHUB-APP.md) and one `github-app-login` on the VM):
+
+```bash
+GITHUB_AUTH=app         # legacy (default) | app
+```
+
+Containers then get no agent and no key. git pushes over https with a token
+scoped to the codespace's own repository, fetched from the VM's broker by a
+credential helper on every push; `gh` is a shim that fetches a fresh one per
+run; commits are signed on the VM. SSH remote URLs are rewritten to https in
+the container, so a checkout cloned as `git@github.com:…` still pushes. A
+compromised codespace can push to its own repository and nowhere else — as in
+real Codespaces. Containers made before the switch keep whatever credential
+they were created with, and `up` says so: `codespace rebuild` each one.
+
+The token is in the environment as `GITHUB_TOKEN`, the name real Codespaces
+uses, set at `up` (and refreshed for every `gh` run by the shim). `GH_TOKEN` is
+yours: `export GH_TOKEN=<a PAT>` when you need more than the codespace's own
+repository, and both `gh` and `git` use it — gh ranks `GH_TOKEN` first, and the
+credential helper honours it. `unset GH_TOKEN` drops back to the scoped token.
+
+A dotfiles repository given as a URL must then be public, since nothing in
+the container can authenticate the clone; `DOTFILES_REPOSITORY=/persist/dotfiles`
+needs no credential at all.
+
 **Signing on the VM instead** — `GIT_SIGNING=vm` in `/persist/codespace/config`:
 
 ```bash
@@ -722,8 +749,10 @@ locked, the commit fails with "run ssh-auth on the VM".
 **`gh` in containers.** On the VM the login lives in `~/.config/gh`, which is on
 `/persist` — so it survives a reboot *and* a `system.vdi` wipe. Containers have
 their own `$HOME` and inherit nothing, so `codespace up` reads `gh auth token`
-on the VM and hands the container `GH_TOKEN`, the same trick real Codespaces
-uses. It is read at `up` time, so re-run `codespace up` after re-authenticating.
+on the VM and hands the container `GITHUB_TOKEN`, the variable real
+Codespaces sets — in `GITHUB_AUTH=app`, a token scoped to the codespace's
+repository instead. `GH_TOKEN` is left unset, so exporting your own overrides
+it. It is read at `up` time, so re-run `codespace up` after re-authenticating.
 `CONTAINER_GH_TOKEN=0` in the launcher config turns it off.
 
 > `gh` itself is not in most base images — add
@@ -753,7 +782,7 @@ harmless duplicate.
 | name and email | launcher (and dotfiles) |
 | `gpg.format`, `user.signingkey`, `commit.gpgsign` | launcher (and dotfiles) |
 | `allowed_signers`, `url.insteadOf` | launcher (and dotfiles) |
-| `GIT_SSH_COMMAND`, `SSH_AUTH_SOCK`, `GH_TOKEN` | launcher only |
+| `GIT_SSH_COMMAND`, `SSH_AUTH_SOCK`, `GITHUB_TOKEN` | launcher only |
 | shell, aliases, editor preferences | dotfiles only |
 | key material in **real Codespaces** (`$SSH_ANIMMOZ_KEY`) | dotfiles only |
 
@@ -904,6 +933,8 @@ scripts/git-sign-service        VM side of commit signing
 scripts/git-sign-codespace      container side: git's signing program
 scripts/github-app-login        authorise the GitHub App once
 scripts/github-token-service    hands a codespace a token scoped to its repository
+scripts/git-credential-codespace container side: git's credential helper
+scripts/gh-codespace            container side: gh with a fresh token per run
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 templates/devcontainer.json     the default config for `--config template`
 docs/BOOTSTRAP.md               full install walkthrough

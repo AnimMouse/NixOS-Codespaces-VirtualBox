@@ -142,6 +142,8 @@ scripts/
 ├── git-sign-codespace         # container side: git's gpg.ssh.program, plain sh + curl
 ├── github-app-login           # authorise the GitHub App once, by device flow
 ├── github-token-service       # token broker: a token scoped to the caller's repository
+├── git-credential-codespace   # container side: git's credential helper for https://github.com
+├── gh-codespace               # container side: gh with a fresh scoped token per run
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
 docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials
@@ -248,7 +250,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 |---|---|
 | **Lockout.** A user with `isNormalUser` but no `hashedPassword`/`hashedPasswordFile`/`authorizedKeys` produces an unloggable machine after reboot | Config must declare auth. Add an assertion if practical |
 | **known_hosts collision.** ISO and installed system share `localhost:2222` with different keys | Persist host keys to `/persist/ssh/`. Then it happens once, ever |
-| **Git credentials.** Codespaces injects a token; nothing does that locally, so `git push` fails inside containers | Mount `/persist/git` (the git key only) into containers from the launcher, and inject `GH_TOKEN` from the VM's `gh`. Not `/persist/ssh`, and not read-only — see below |
+| **Git credentials.** Codespaces injects a token; nothing does that locally, so `git push` fails inside containers | Mount `/persist/git` (the git key only) into containers from the launcher, and inject `GITHUB_TOKEN` (the name Codespaces uses; `GH_TOKEN` is left for the user to override with) from the VM's `gh`, or scoped by the broker in `GITHUB_AUTH=app`. Not `/persist/ssh`, and not read-only — see below |
 | **Secrets in a public repo.** Password hashes must not be committed | Nothing secret is committed or needed in the config: the editor CA, nginx's certificate and the browser's client certificate are generated on first boot into `/persist/tls` (root only) by `editor-tls.service`; the `.p12` passphrase is logged to the journal once. The editors themselves have no password |
 | **No `devcontainer down`.** The CLI has `up`, `exec`, `build` — no down/stop | The `codespace` wrapper implements `down` via `docker stop` |
 | **Docker image sprawl** | `virtualisation.docker.autoPrune.enable = true`, and Docker's `data-root` set to `/persist/docker` (a bind mount would need its source to exist before systemd mounts it) |

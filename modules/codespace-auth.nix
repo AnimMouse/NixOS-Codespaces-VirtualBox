@@ -29,14 +29,20 @@ let
     (builtins.replaceStrings [ "@KEY_FILE@" ] [ p.keyFile ]
       (builtins.readFile ../scripts/git-sign-service));
 
-  # Runs inside the container's own image, so a plain #!/bin/sh file rather
-  # than writeShellApplication. Still shellchecked, as POSIX sh.
-  git-sign-codespace = pkgs.writeTextFile {
-    name = "git-sign-codespace";
+  # The container-side clients, all plain #!/bin/sh: they run inside each
+  # codespace's own image, where a /nix/store shebang means nothing. Still
+  # shellchecked, as POSIX sh. Copied into ${dir} below, so a VM rebuild
+  # updates them in every container at once.
+  shClient = name: pkgs.writeTextFile {
+    inherit name;
     executable = true;
-    text = builtins.readFile ../scripts/git-sign-codespace;
+    text = builtins.readFile (../scripts + "/${name}");
     checkPhase = "${lib.getExe pkgs.shellcheck} -s sh $target";
   };
+  git-sign-codespace = shClient "git-sign-codespace";
+  # Phase 3, GITHUB_AUTH=app: git's credential helper, and the gh shim.
+  git-credential-codespace = shClient "git-credential-codespace";
+  gh-codespace = shClient "gh-codespace";
 in
 {
   # Credentials for codespaces that never hand them the key. docs/GITHUB-APP.md
@@ -160,6 +166,8 @@ in
   systemd.tmpfiles.rules = [
     "d  ${dir}                    0755 root root -"
     "C+ ${dir}/git-sign-codespace -    -    -    - ${git-sign-codespace}"
+    "C+ ${dir}/git-credential-codespace - - - - ${git-credential-codespace}"
+    "C+ ${dir}/gh-codespace       -    -    -    - ${gh-codespace}"
     "d  ${stateDir}               0700 dev  users -"
     "d  ${stateDir}/entitlements  0700 dev  users -"
   ];

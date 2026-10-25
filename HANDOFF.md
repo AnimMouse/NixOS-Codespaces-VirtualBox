@@ -123,6 +123,13 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
+- **`GITHUB_AUTH=app`** (phase 3 of [docs/GITHUB-APP.md](docs/GITHUB-APP.md)).
+  Tested here against the live broker: the app-mode git config on a scratch
+  system config, a push to an SSH-form URL rewritten to https and
+  authenticated by the helper alone, another repo refused with 403, and the
+  gh shim handing a stand-in gh a fresh `ghu_` token. Not yet a container
+  created in app mode: no agent mount, `ssh -T git@github.com` failing, a
+  real push and `gh pr list`, and a signed commit.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
@@ -269,8 +276,9 @@ typo and watching `SC2154` stop it.
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
+| `GITHUB_AUTH` | `legacy` | `app`: no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository, signing on the VM (docs/GITHUB-APP.md). Takes effect on `codespace rebuild` |
 | `GIT_SIGNING` | `agent` | `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
-| `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
+| `CONTAINER_GH_TOKEN` | `1` | set `GITHUB_TOKEN` in containers: the VM's `gh` token, or in `GITHUB_AUTH=app` a scoped one. `GH_TOKEN` is never set, so you can export your own over it |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
