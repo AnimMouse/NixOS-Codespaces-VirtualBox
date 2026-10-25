@@ -5,9 +5,15 @@ systemd with the socket as stdin and stdout (modules/codespace-auth.nix).
 docs/GITHUB-APP.md §4.3.
 
     GET /token   the token, as plain text — what a git credential helper or
-                 a gh shim needs, readable with nothing but curl
+                 a gh shim needs, readable with nothing but curl. With
+                 ?repo=owner/name, the token for that repository; without,
+                 the one for the codespace's own
     GET /whoami  which codespace and repositories this caller is entitled to,
-                 and the cached token's expiry; never the token itself
+                 and the cached tokens' expiry; never a token itself
+    POST /revoke?container=<id>
+                 from the VM only, never from a container: revoke that
+                 container's tokens at GitHub and forget them. The launcher
+                 calls it when it drops a container (`rm`, `rebuild`, `gc`)
 
 Who is asking is read from the kernel, never from the request: the
 connecting process's pidfd gives its PID, its cgroup names its Docker
@@ -15,6 +21,14 @@ container, and the pidfd is checked again afterwards so a PID reused in
 between cannot be mistaken for the caller. What a container may have is the
 entitlement the launcher wrote for that container ID at `up`. Nothing in a
 request can widen it.
+
+One token per permission set, not one for everything: a scoped token carries
+one set of permissions for all its repositories, so the union would hand a
+repository asked for read-only the write access another one asked for. git's
+helper names the repository (credential.useHttpPath), so each push gets the
+token for its own. A repository you cannot push to gets read-only, as in
+Codespaces — checked against GitHub, since the entitlement only says what the
+devcontainer.json asked for.
 
 Built by modules/codespace-auth.nix with pkgs.writers.writePython3Bin.
 """
@@ -40,6 +54,11 @@ SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)
 # Refresh or re-scope this long before expiry, so a token handed out is never
 # about to lapse under a push.
 MARGIN = 300
+# How long a plan — which repositories you can push to, so which get write —
+# is trusted before GitHub is asked again. A rewritten entitlement (every `up`)
+# replans at once.
+PLAN_TTL = 8 * 3600
+REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.*-]+$")
 LOGIN_NEEDED = (
     "the VM's GitHub App authorisation has lapsed or was revoked.\n"
     "On the VM, run: github-app-login\n"
@@ -80,7 +99,8 @@ def pidfd_pid(pidfd):
 
 
 def caller_container():
-    """The full ID of the Docker container the connecting process is in."""
+    """The full ID of the Docker container the connecting process is in, or
+    None for a process on the VM itself."""
     s = socket.socket(fileno=0)
     try:
         pidfd = s.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
@@ -98,9 +118,7 @@ def caller_container():
             raise Refusal(403, "the connecting process exited mid-request\n")
     finally:
         os.close(pidfd)
-    if not m:
-        raise Refusal(403, "not a codespace: the caller is in no container\n")
-    return m.group(1)
+    return m.group(1) if m else None
 
 
 def read_json(path):
@@ -138,28 +156,36 @@ def read_secret(name):
         return ""
 
 
-def post(url, fields=None, body=None, auth=None):
+def call(method, url, fields=None, body=None, auth=None, bearer=None):
     headers = {"Accept": "application/json",
                "X-GitHub-Api-Version": "2022-11-28"}
+    data = None
     if fields is not None:
         data = urllib.parse.urlencode(fields).encode()
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-    else:
+    elif body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
     if auth:
         cred = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
         headers["Authorization"] = f"Basic {cred}"
+    elif bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(url, data=data, headers=headers,
-                                 method="POST")
+                                 method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return r.status, json.load(r)
+            raw = r.read()
+            return r.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.load(e)
         except ValueError:
             return e.code, {"message": e.reason}
+
+
+def post(url, **kw):
+    return call("POST", url, **kw)
 
 
 def account_token(client_id):
@@ -213,48 +239,191 @@ def parse_expiry(value, fallback):
 
 
 def stamp(t):
-    return datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    # With the offset: the VM keeps UTC while containers take TIMEZONE, so a
+    # bare time read in a container looks hours off.
+    return datetime.datetime.fromtimestamp(t).astimezone().strftime("%Y-%m-%d %H:%M %z")
 
 
-def scoped_token(cid, ent):
-    """A token for this container's repositories, cached until near expiry."""
-    cache = os.path.join(STATE, f"{cid}.json")
-    c = read_json(cache)
-    if c and c.get("expires_at", 0) - time.time() > MARGIN:
-        return c["token"], c["expires_at"]
-
-    repos = ent.get("repositories") or {}
-    owners = {r.split("/")[0] for r in repos}
-    if len(owners) != 1:
-        # /token/scoped takes one target. Several owners is phase 4.
-        raise Refusal(400, "repositories under more than one owner are not supported yet\n")
-    owner = owners.pop()
-    perms = {}
-    for p in repos.values():
-        for k, v in p.items():
-            if perms.get(k) != "write":
-                perms[k] = v
-
+def app_credentials():
     client_id = read_secret("client_id")
     secret = read_secret("client_secret")
     if not client_id or not secret:
         raise Refusal(503, "the GitHub App's client_id or client_secret is missing on the VM\n")
+    return client_id, secret
+
+
+def can_push(repo, access):
+    """True, False, or None when GitHub will not show the repository at all:
+    gone, or not reachable by both you and the app."""
+    status, r = call("GET", f"https://api.github.com/repos/{repo}",
+                     bearer=access)
+    if status != 200:
+        log(f"cannot see {repo}: HTTP {status} {r.get('message', '')}")
+        return None
+    return bool((r.get("permissions") or {}).get("push"))
+
+
+def plan(ent, access):
+    """The tokens this entitlement needs: its repositories grouped by owner
+    and effective permissions, each group one scoped token."""
+    groups = {}
+    for repo, perms in sorted((ent.get("repositories") or {}).items()):
+        if not REPO.match(repo) or not isinstance(perms, dict):
+            continue
+        owner, name = repo.split("/", 1)
+        if name != "*":
+            push = can_push(repo, access)
+            if push is None:
+                continue
+            if not push:
+                perms = {k: "read" for k in perms}
+        key = (owner.lower(), json.dumps(perms, sort_keys=True),
+               name == "*")
+        g = groups.setdefault(key, {"owner": owner, "permissions": perms,
+                                    "repositories": []})
+        if name == "*":
+            g["all"] = True
+        else:
+            g["repositories"].append(name)
+    return list(groups.values())
+
+
+def covers(group, repo):
+    owner, name = repo.split("/", 1)
+    if group["owner"].lower() != owner.lower():
+        return False
+    if group.get("all"):
+        return True
+    return name.lower() in (n.lower() for n in group["repositories"])
+
+
+def find(groups, repo):
+    """The group covering `repo` — one naming it before an owner/* one, which
+    may grant less than the repository's own entry asked for."""
+    named = [g for g in groups if not g.get("all") and covers(g, repo)]
+    wild = [g for g in groups if g.get("all") and covers(g, repo)]
+    return (named + wild + [None])[0]
+
+
+def pick(groups, ent, repo):
+    """The group a request is for: the named repository's, else the
+    codespace's own repository's, else the only one there is."""
+    if repo:
+        g = find(groups, repo)
+        if g:
+            return g
+        raise Refusal(403, f"{ent.get('codespace')} is not entitled to {repo}.\n"
+                      "Add it to customizations.codespaces.repositories in its "
+                      "devcontainer.json, then `codespace up` it on the VM to approve.\n")
+    src = ent.get("source") or ""
+    if src and find(groups, src):
+        return find(groups, src)
+    if len(groups) == 1:
+        return groups[0]
+    if not groups:
+        raise Refusal(404, f"{ent.get('codespace')} has no GitHub repository to scope a token to\n")
+    raise Refusal(404, f"{ent.get('codespace')} has several; ask with ?repo=owner/name\n")
+
+
+def scoped_token(cid, ent, ent_mtime, repo):
+    """A token for the group covering `repo`, cached until near expiry."""
+    cache = os.path.join(STATE, f"{cid}.json")
+    c = read_json(cache) or {}
+    now = time.time()
+    groups = c.get("groups")
+    planned = c.get("planned_at", 0)
+    if groups is None or planned < ent_mtime or now - planned > PLAN_TTL:
+        client_id, _ = app_credentials()
+        access, _ = account_token(client_id)
+        fresh = plan(ent, access)
+        # Keep tokens still good for a group that has not changed.
+        old = {json.dumps(_shape(g), sort_keys=True): g for g in groups or []}
+        for g in fresh:
+            prev = old.get(json.dumps(_shape(g), sort_keys=True))
+            if prev and prev.get("token"):
+                g["token"], g["expires_at"] = prev["token"], prev["expires_at"]
+        # Tokens for groups that are gone are revoked, not just forgotten.
+        kept = {g.get("token") for g in fresh}
+        revoke([g for g in groups or [] if g.get("token") not in kept])
+        groups = fresh
+        c = {"planned_at": now, "groups": groups}
+        write_private(cache, json.dumps(c))
+
+    g = pick(groups, ent, repo)
+    if g.get("token") and g.get("expires_at", 0) - now > MARGIN:
+        return g["token"]
+
+    client_id, secret = app_credentials()
     access, account_expiry = account_token(client_id)
+    body = {"access_token": access, "target": g["owner"],
+            "permissions": g["permissions"]}
+    if not g.get("all"):
+        body["repositories"] = g["repositories"]
     status, r = post(
         f"https://api.github.com/applications/{client_id}/token/scoped",
-        body={"access_token": access, "target": owner,
-              "repositories": [r.split("/", 1)[1] for r in repos],
-              "permissions": perms},
-        auth=(client_id, secret))
+        body=body, auth=(client_id, secret))
     if "token" not in r:
         log(f"scoping failed for {ent.get('codespace')}: HTTP {status} {r.get('message', '')}")
         raise Refusal(502, f"GitHub refused to scope a token: {r.get('message', status)}\n")
-    expires_at = parse_expiry(r.get("expires_at"), account_expiry)
-    write_private(cache, json.dumps({"token": r["token"],
-                                     "expires_at": expires_at}))
-    log(f"token for {ent.get('codespace')} ({cid[:12]}): "
-        f"{', '.join(sorted(repos))} {perms}, expires {stamp(expires_at)}")
-    return r["token"], expires_at
+    g["token"] = r["token"]
+    g["expires_at"] = parse_expiry(r.get("expires_at"), account_expiry)
+    write_private(cache, json.dumps(c))
+    log(f"token for {ent.get('codespace')} ({cid[:12]}): {describe(g)}, "
+        f"expires {stamp(g['expires_at'])}")
+    return g["token"]
+
+
+def _shape(g):
+    return {k: g.get(k) for k in ("owner", "permissions", "repositories", "all")}
+
+
+def describe(g):
+    names = "*" if g.get("all") else ",".join(g["repositories"])
+    return f"{g['owner']}/{{{names}}} {g['permissions']}"
+
+
+def revoke(groups):
+    """Revoke these tokens at GitHub. Best effort: each lapses within 8 hours
+    anyway, and a revocation that fails must not stop a container going."""
+    now = time.time()
+    tokens = [g["token"] for g in groups
+              if g.get("token") and g.get("expires_at", 0) > now]
+    if not tokens:
+        return 0
+    try:
+        client_id, secret = app_credentials()
+    except Refusal:
+        return 0
+    done = unknown = 0
+    for t in tokens:
+        status, r = call("DELETE",
+                         f"https://api.github.com/applications/{client_id}/token",
+                         body={"access_token": t}, auth=(client_id, secret))
+        if status == 204:
+            done += 1
+        elif status == 404:
+            # Already revoked or expired — or GitHub not knowing the token at
+            # all, which would mean revocation does nothing. Counted apart so
+            # the log can tell.
+            unknown += 1
+        else:
+            log(f"revoking a token failed: HTTP {status} {r.get('message', '')}")
+    if unknown:
+        log(f"{unknown} token(s) unknown to GitHub when revoked (404)")
+    return done + unknown
+
+
+def revoke_container(cid):
+    cache = os.path.join(STATE, f"{cid}.json")
+    c = read_json(cache) or {}
+    n = revoke(c.get("groups") or [])
+    try:
+        os.unlink(cache)
+    except FileNotFoundError:
+        pass
+    if n:
+        log(f"revoked {n} token(s) of container {cid[:12]}")
+    return n
 
 
 def read_request():
@@ -267,32 +436,55 @@ def read_request():
 
 
 def main():
-    method, path = read_request()
-    if method != "GET" or path not in ("/token", "/whoami"):
-        respond(404, "GET /token or GET /whoami\n")
+    method, target = read_request()
+    target = urllib.parse.urlsplit(target or "")
+    path, query = target.path, urllib.parse.parse_qs(target.query)
+    route = (method, path)
+    if route not in (("GET", "/token"), ("GET", "/whoami"), ("POST", "/revoke")):
+        respond(404, "GET /token[?repo=owner/name], GET /whoami, or POST /revoke\n")
         return
     try:
         cid = caller_container()
-        ent = read_json(os.path.join(ENTITLEMENTS, f"{cid}.json"))
+        # The VM may revoke; only a container may hold a token. Phase 5 gives
+        # the VM tokens of its own (docs/GITHUB-APP.md §6.1).
+        if route == ("POST", "/revoke"):
+            if cid is not None:
+                raise Refusal(403, "revocation is for the VM, not for a codespace\n")
+            ids = [i for i in query.get("container", [])
+                   if re.fullmatch(r"[0-9a-f]{64}", i)]
+            if not ids:
+                raise Refusal(400, "POST /revoke?container=<full container id>\n")
+            with open(os.path.join(STATE, "lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                n = sum(revoke_container(i) for i in ids)
+            respond(200, f"revoked {n}\n")
+            return
+        if cid is None:
+            raise Refusal(403, "not a codespace: the caller is in no container\n")
+        ent_path = os.path.join(ENTITLEMENTS, f"{cid}.json")
+        ent = read_json(ent_path)
         if ent is None:
             raise Refusal(403, "this container has no entitlement — `codespace up` it on the VM\n")
         if path == "/whoami":
             c = read_json(os.path.join(STATE, f"{cid}.json")) or {}
-            exp = c.get("expires_at")
             respond(200, json.dumps({
                 "codespace": ent.get("codespace"),
                 "container": cid[:12],
+                "source": ent.get("source") or None,
                 "repositories": ent.get("repositories") or {},
-                "cached_token_expires": stamp(exp) if exp else None,
+                "tokens": [{"for": describe(g),
+                            "expires": stamp(g["expires_at"]) if g.get("token") else None}
+                           for g in c.get("groups") or []],
             }, indent=2) + "\n")
             return
-        if not ent.get("repositories"):
-            raise Refusal(404, f"{ent.get('codespace')} has no GitHub repository to scope a token to\n")
+        repo = (query.get("repo") or [""])[0]
+        if repo and not REPO.match(repo):
+            raise Refusal(400, f"not a repository: {repo}\n")
         # One at a time: two refreshes at once would each invalidate the
         # other's refresh token, and lock the VM out until a new login.
         with open(os.path.join(STATE, "lock"), "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            token, _ = scoped_token(cid, ent)
+            token = scoped_token(cid, ent, os.stat(ent_path).st_mtime, repo)
         respond(200, token + "\n")
     except Refusal as r:
         respond(r.status, r.message)

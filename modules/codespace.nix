@@ -7,10 +7,11 @@ let
     # The flake's checkout, so the launcher can tell which codespace is the
     # one editing this machine — the default for VM_CONTROL. And the default
     # devcontainer.json, from the store, so the template is versioned with the
-    # launcher that copies it.
+    # launcher that copies it. And where github-app-login keeps the refresh
+    # token, so `up` can say when it has not been run.
     text = builtins.replaceStrings
-      [ "@FLAKE_DIR@" "@TEMPLATE@" ]
-      [ (import ../paths.nix).flakeDir "${../templates/devcontainer.json}" ]
+      [ "@FLAKE_DIR@" "@TEMPLATE@" "@GITHUB_APP_DIR@" ]
+      [ (import ../paths.nix).flakeDir "${../templates/devcontainer.json}" (import ../paths.nix).githubAppDir ]
       (builtins.readFile ../scripts/codespace);
   };
 in

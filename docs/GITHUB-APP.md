@@ -1,4 +1,4 @@
-# Scoped GitHub credentials — phases 1–3 built and verified, 4–5 planned
+# Scoped GitHub credentials — phases 1–4 built and verified, 5 planned
 
 Give each codespace a GitHub credential that reaches **only its own
 repository**, the way a real Codespace's `GITHUB_TOKEN` does, using a personal
@@ -9,7 +9,8 @@ Built and verified on the VM: phase 1, signing on the VM
 (`modules/codespace-auth.nix`, `scripts/git-sign-*`, `GIT_SIGNING`); phase 2,
 the app, `github-app-login` and the token broker; phase 3, `GITHUB_AUTH=app` —
 no SSH credential in containers, git and gh on scoped tokens, in use in every
-codespace. Phases 4 (parity) and 5 (the VM itself on the app) are planned. Facts marked *checked* were read from GitHub's
+codespace. Phase 4, parity with Codespaces, is built and checked on the VM
+(§4.7), with two edges open. Phase 5 (the VM itself on the app) is planned. Facts marked *checked* were read from GitHub's
 documentation, from source, or observed; facts marked **verify** must be
 confirmed before or during the build, and the design bends if they turn out
 false.
@@ -216,8 +217,9 @@ container.
   - the source repository, from the checkout's `origin` remote;
   - plus `customizations.codespaces.repositories`, read through
     `devcontainer read-configuration` so JSONC and `--override-config` are
-    handled by the CLI rather than parsed by hand. **Verify** that its output
-    includes `customizations`.
+    handled by the CLI rather than parsed by hand. *Checked* (CLI 0.87.0): its
+    `.configuration.customizations` carries the block, comments and trailing
+    commas handled, for a repo's own file and an override alike. §4.7.
 - On request: refresh the account-wide user token if it is near expiry,
   persist the rotated refresh token, call `/token/scoped`, cache the result
   until a few minutes before it expires, return it.
@@ -351,6 +353,97 @@ Issues RW. Not Workflows — a codespace that edits CI says so:
 
 Read-only when you cannot write to the source repository, as in Codespaces.
 
+### 4.7 Parity — phase 4, built
+
+**Other repositories.** At `up`, the launcher reads
+`customizations.codespaces.repositories` (`requested_repositories`) and
+normalises it as Codespaces does: `read-all`, `write-all`, or a map of
+permissions; `owner/*` for every repository of the owner. Then:
+
+- **Same owner only**, as Codespaces requires — which also suits
+  `/token/scoped`, whose `target` is one owner. Others are dropped with a note.
+- **Clamped to the app's permissions** (§4.1, `APP_PERMISSIONS` in the
+  launcher); GitHub refuses a token asking for more outright, so a request
+  for, say, `secrets` is dropped with a note rather than breaking the token.
+  `metadata: read` is always added.
+- **The source repository's entry adds to its defaults** (§4.6), so naming it
+  is how a codespace asks for `workflows`.
+- **Approved on the VM** (`granted_repositories`). The container can write
+  the `devcontainer.json` it came from, so honouring every request would let a
+  compromised codespace widen its own token at the next `up`. Anything new or
+  widened is shown and asked about; with no terminal it is left out and `up`
+  says so. Approvals live in `/persist/codespace/<name>/repositories.approved`
+  and are replaced by what was granted each time.
+
+**One token per permission set.** A scoped token has one set of permissions
+for all its repositories, so a union would give a repository asked for
+read-only the write asked for another. The broker plans the entitlement into
+groups by owner and permissions, one token each. The credential helper turns
+on `credential.useHttpPath` and passes the repository as `/token?repo=`; the
+broker returns the group covering it, a named entry before an `owner/*` one,
+and refuses — naming the fix — a repository it has none for. A request with no
+repository (`gh`, `GITHUB_TOKEN`) gets the source repository's group.
+
+**Read-only where you cannot push.** When planning, the broker asks
+`GET /repos/{owner}/{repo}` with the account token: `permissions.push` false
+turns every permission of that repository to `read`; a 404 drops it, since
+`/token/scoped` would refuse the whole group over it. A plan is reused until
+the entitlement is rewritten (every `up`) or 8 hours pass, and a replan keeps
+the tokens of groups that did not change. `owner/*` is not checked — GitHub
+bounds a user token by your own access anyway.
+
+**Revocation.** `POST /revoke?container=<id>`, accepted only from a caller in
+no container — the VM. The launcher calls it whenever it drops an
+entitlement: `rm`, `gc`, and the old container's on `rebuild`. The broker
+`DELETE`s each live token at `/applications/{client_id}/token` and forgets
+them; a replan revokes the tokens of groups that are gone too. Best effort: a
+failure is logged and the container goes anyway, the token lapsing within 8
+hours.
+
+**`app` is the default.** Without `github-app-login` a codespace still comes
+up, signs, and reads public repositories; `up` warns that nothing in it can
+push. That is chosen over falling back to the SSH key silently.
+
+*Tested* against a mock of GitHub (the broker's real functions, with GitHub
+replaced): grouping, read-only on a repository without push, a 404 dropped,
+`owner/*` without a repository list, named before wildcard, cache hits making
+no calls, a replan keeping unchanged tokens and revoking a removed group's,
+revocation of every live token, a container refused `/revoke` and the VM
+refused `/token`. The launcher's normalising, approval and entitlement were
+run with a stubbed CLI.
+
+**Checked on the VM** (2026-10-26), in the dev-vm codespace and a throwaway
+codespace for `dotfiles-codespaces` whose config asked for a named repository
+`read-all`, `AnimMouse/*` with `contents: read`, another owner's repository,
+and `administration` on its own:
+- [x] git sends `path=owner/name` (no `.git`) with `useHttpPath`, on push and
+      on `ls-remote`.
+- [x] `up` dropped the other owner and `administration` with notes, asked
+      before granting the rest, and the entitlement merged the source
+      repository's request into its defaults.
+- [x] One token per permission set: the source repository pushed, the
+      `read-all` one cloned and was refused a push, and the broker answered
+      403 for the other owner.
+- [x] `/token/scoped` without `repositories` covers an unnamed private
+      repository of the target (`git ls-remote` through `AnimMouse/*`).
+- [x] Revocation: every token a container had fetched was revoked once — the
+      replaced container's on `rebuild`, the last one's on `rm` — with
+      success from GitHub. The log does not yet tell 204 from 404 for those
+      runs; it does now.
+
+**Still open:**
+- [ ] A revoked scoped token is refused afterwards, and revoking one leaves
+      the account token and the others working — the 204/404 split in the log
+      answers the first half at the next `rm` or `rebuild`.
+- [ ] git sends `path=` for LFS too.
+- [ ] Read-only where you cannot push, against a real repository: all of a
+      personal account's repositories are pushable, so this needs an
+      organisation repository with read access. The planning's GitHub call
+      itself is exercised on every `up` — `permissions.push` was read for each
+      named repository above.
+- [ ] `/token/scoped` with permissions you lack on a repository: refused or
+      narrowed. Only an `owner/*` group can reach it now.
+
 ---
 
 ## 5. Consequences to accept or solve
@@ -382,8 +475,9 @@ Read-only when you cannot write to the source repository, as in Codespaces.
 - **Signing depends on the VM's agent holding the key**, as it does today with
   the forwarded agent — `ssh-auth` after a reboot, as now.
 - **Revocation**: `codespace rm` drops the codespace's entitlement and
-  revokes its cached token (`DELETE /applications/{client_id}/token`). Scoped
-  tokens expire on their own regardless.
+  revokes its cached tokens (`DELETE /applications/{client_id}/token`), as do
+  `gc` and `rebuild` for the container they replace (§4.7). Scoped tokens
+  expire on their own regardless.
 - **Organisations must install the app.** A user access token reaches only
   where both you and the app can: acting *as* you is not acting *everywhere*
   you can. So an org's repositories need the app installed on that org — by
@@ -423,9 +517,10 @@ Each phase ships on its own and leaves the system working.
    token path exists leaves a container that cannot push. A launcher setting
    (`GITHUB_AUTH=app|legacy`, default `legacy` until this phase is proven) so
    one `codespace rebuild` moves a codespace either way.
-4. **Parity.** `customizations.codespaces.repositories`, read-only on repos you
-   cannot write, revocation on `rm`. Amend CLAUDE.md §8 (the agent-forwarding
-   rows) and §9, add the gotchas found, and make `app` the default.
+4. **Parity — built and checked on the VM (§4.7), two edges open.**
+   `customizations.codespaces.repositories`, read-only on repos you cannot
+   write, revocation on `rm`. CLAUDE.md §8 (the agent-forwarding rows) and §9
+   amended, the gotchas found added, and `app` the default.
 5. **The VM itself on the app — plan.** The SSH key stops authenticating
    anywhere and only signs. See §6.1.
 
@@ -487,8 +582,7 @@ app, leaving the key one job: signing.
 
 ### Rollback
 
-Through phase 3, `GITHUB_AUTH=legacy` plus `codespace rebuild` restores today's
-behaviour. The app can be uninstalled from GitHub at any time, which
+`GITHUB_AUTH=legacy` plus `codespace rebuild` restores agent forwarding. The app can be uninstalled from GitHub at any time, which
 invalidates every token it ever issued.
 
 ---
@@ -505,5 +599,10 @@ invalidates every token it ever issued.
 - [ ] A checkout with an SSH `origin` pushes from its container over HTTPS.
 - [ ] A codespace left running past 8 hours still pushes.
 - [ ] After `codespace rm`, its cached token no longer works.
+- [ ] A repository added under `customizations.codespaces.repositories` is
+      asked about at `up`, and once approved pushes — while one only granted
+      `read-all` is refused a push, and one not listed is refused outright.
+- [ ] A repository you can only read gets a read-only token even when asked
+      for `write`.
 - [ ] A codespace with no `DOTFILES_REPOSITORY` still commits as you and signs
       (CLAUDE.md §6); one *with* the dotfiles still signs too.

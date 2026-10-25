@@ -103,12 +103,13 @@ GitHub keeps authentication keys and signing keys in separate lists but accepts
 the same public key in both. So one key pushes, pulls **and** signs — no token to
 rotate.
 
-> **Containers can do without the key entirely.** With `GITHUB_AUTH=app` (see
+> **Containers never get the key.** By default (`GITHUB_AUTH=app`, see
 > [GitHub authentication](#github-authentication) and
 > [docs/GITHUB-APP.md](docs/GITHUB-APP.md)) the key stays on the VM, signs
 > there, and codespaces push with tokens scoped to their own repository. That
-> is the recommended setup once the GitHub App is registered; the agent
-> forwarding described here is the `legacy` default.
+> needs the GitHub App registered and one `github-app-login` on the VM — until
+> then a codespace comes up able to sign but not to push, and `up` says so.
+> The agent forwarding described below is `GITHUB_AUTH=legacy`.
 
 ```bash
 ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
@@ -677,7 +678,70 @@ The VM rewrites GitHub https URLs to SSH:
 That is what lets `codespace up github.com/you/private-repo` work — the launcher
 clones the https form and git quietly authenticates with the key.
 
-**How containers get credentials** — checked in this order, and what each mode
+**How containers get credentials: `GITHUB_AUTH=app`, the default.** No SSH
+credential in containers at all. Needs the GitHub App setup in
+[docs/GITHUB-APP.md](docs/GITHUB-APP.md) and one `github-app-login` on the VM;
+`/persist/codespace/config` can switch back:
+
+```bash
+GITHUB_AUTH=legacy      # app (default) | legacy
+```
+
+Containers get no agent and no key. git pushes over https with a token
+scoped to the codespace's own repository, fetched from the VM's broker by a
+credential helper on every push; `gh` is a shim that fetches a fresh one per
+run; commits are signed on the VM. SSH remote URLs are rewritten to https in
+the container, so a checkout cloned as `git@github.com:…` still pushes. A
+compromised codespace can push to its own repository and nowhere else — as in
+real Codespaces. Containers made before the switch keep whatever credential
+they were created with, and `up` says so: `codespace rebuild` each one.
+
+As in Codespaces, the token is **read-only on a repository you cannot push
+to**, and is **revoked** when its container goes — `codespace rm`, `rebuild`,
+or the retention sweep — rather than left to lapse.
+
+The token is in the environment as `GITHUB_TOKEN`, the name real Codespaces
+uses: fetched fresh by every login shell, and by the shim for every `gh` run.
+git never reads it — the credential helper asks the VM on each push — so only
+a process already running for 8 hours can hold an expired one. `GH_TOKEN` is
+yours: `export GH_TOKEN=<a PAT>` when you need more than the codespace's own
+repository, and both `gh` and `git` use it — gh ranks `GH_TOKEN` first, and the
+credential helper honours it. `unset GH_TOKEN` drops back to the scoped token.
+
+A dotfiles repository given as a URL must then be public, since nothing in
+the container can authenticate the clone; `DOTFILES_REPOSITORY=/persist/dotfiles`
+needs no credential at all.
+
+**Other repositories**, the way Codespaces grants them — in the codespace's
+`devcontainer.json`, so the same file works there:
+
+```jsonc
+"customizations": {
+  "codespaces": {
+    "repositories": {
+      "you/lib":   { "permissions": "read-all" },
+      "you/infra": { "permissions": { "contents": "write", "pull_requests": "write" } },
+      "you/this-repo": { "permissions": { "workflows": "write" } }
+    }
+  }
+}
+```
+
+- Only repositories of the **same owner** as the codespace's own, as in
+  Codespaces; `you/*` means all of them. Permissions are `read-all`,
+  `write-all`, or a map, capped at what the app was registered with —
+  anything else is dropped with a note.
+- Naming the codespace's own repository adds to its defaults; that is how a
+  codespace that edits `.github/workflows/` asks for `workflows`.
+- **Every new or widened request is shown at `up` and asks for a yes.** The
+  container can edit its own `devcontainer.json`, so a request is not a grant.
+  With no terminal to ask at — the retention sweep, a script — it is left out
+  and `up` says so. Approvals are kept in `/persist/codespace/<name>/`.
+- One token per permission set, not one for everything: the credential helper
+  tells the broker which repository each push is for. `gh` and `GITHUB_TOKEN`
+  carry the codespace's own repository's token.
+
+**With `GITHUB_AUTH=legacy`** — checked in this order, and what each mode
 actually exposes under `/mnt/git-ssh`:
 
 | | Used when | Container gets | Private key exposed? |
@@ -708,36 +772,8 @@ all work with **no passphrase prompt** — the crypto happens back on the VM.
 Signing works because `user.signingkey` is the *public* key, and `ssh-keygen -Y
 sign` will use the agent when the private half is unreadable.
 
-**No SSH credential in containers at all** — `GITHUB_AUTH=app` in
-`/persist/codespace/config` (after the GitHub App setup in
-[docs/GITHUB-APP.md](docs/GITHUB-APP.md) and one `github-app-login` on the VM):
-
-```bash
-GITHUB_AUTH=app         # legacy (default) | app
-```
-
-Containers then get no agent and no key. git pushes over https with a token
-scoped to the codespace's own repository, fetched from the VM's broker by a
-credential helper on every push; `gh` is a shim that fetches a fresh one per
-run; commits are signed on the VM. SSH remote URLs are rewritten to https in
-the container, so a checkout cloned as `git@github.com:…` still pushes. A
-compromised codespace can push to its own repository and nowhere else — as in
-real Codespaces. Containers made before the switch keep whatever credential
-they were created with, and `up` says so: `codespace rebuild` each one.
-
-The token is in the environment as `GITHUB_TOKEN`, the name real Codespaces
-uses: fetched fresh by every login shell, and by the shim for every `gh` run.
-git never reads it — the credential helper asks the VM on each push — so only
-a process already running for 8 hours can hold an expired one. `GH_TOKEN` is
-yours: `export GH_TOKEN=<a PAT>` when you need more than the codespace's own
-repository, and both `gh` and `git` use it — gh ranks `GH_TOKEN` first, and the
-credential helper honours it. `unset GH_TOKEN` drops back to the scoped token.
-
-A dotfiles repository given as a URL must then be public, since nothing in
-the container can authenticate the clone; `DOTFILES_REPOSITORY=/persist/dotfiles`
-needs no credential at all.
-
-**Signing on the VM instead** — `GIT_SIGNING=vm` in `/persist/codespace/config`:
+**Signing on the VM** is what `GITHUB_AUTH=app` always does. In `legacy` it is
+optional — `GIT_SIGNING=vm` in `/persist/codespace/config`:
 
 ```bash
 GIT_SIGNING=vm          # agent (default) | vm
@@ -749,19 +785,18 @@ back: git in the container runs `/mnt/github/git-sign-codespace` as its
 `gpg.ssh.program`. The point is what it makes possible next. An ssh-agent
 cannot tell signing from logging in, so a container holding the forwarded agent
 can push to every repository you can; a signature from this service is in
-git's own namespace and cannot be used to log in. Once scoped tokens cover
-pushing ([docs/GITHUB-APP.md](docs/GITHUB-APP.md)), the agent stops being
-forwarded at all. Chosen on every `up`; a container from before the service
+git's own namespace and cannot be used to log in — which is what lets
+`GITHUB_AUTH=app` stop forwarding the agent at all. Chosen on every `up`; a container from before the service
 needs one `codespace rebuild` for its `/mnt/github` mount. If the VM's agent is
 locked, the commit fails with "run ssh-auth on the VM".
 
 **`gh` in containers.** On the VM the login lives in `~/.config/gh`, which is on
 `/persist` — so it survives a reboot *and* a `system.vdi` wipe. Containers have
-their own `$HOME` and inherit nothing, so `codespace up` reads `gh auth token`
-on the VM and hands the container `GITHUB_TOKEN`, the variable real
-Codespaces sets — in `GITHUB_AUTH=app`, a token scoped to the codespace's
-repository instead. `GH_TOKEN` is left unset, so exporting your own overrides
-it. It is read at `up` time, so re-run `codespace up` after re-authenticating.
+their own `$HOME` and inherit nothing, so the container gets `GITHUB_TOKEN`,
+the variable real Codespaces sets: a token scoped to the codespace's
+repository, or in `legacy` the VM's own `gh auth token`, read at `up` time —
+re-run `codespace up` after re-authenticating. `GH_TOKEN` is left unset, so
+exporting your own overrides it.
 `CONTAINER_GH_TOKEN=0` in the launcher config turns it off.
 
 > `gh` itself is not in most base images — add

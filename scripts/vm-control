@@ -28,6 +28,9 @@ allowed_unit() {
     code-server|code-server.service|nginx|nginx.service) ;;
     codespace-gc|codespace-gc.service|codespace-gc.timer) ;;
     git-allowed-signers*|git-identity-template*|github-known-hosts*) ;;
+    # The credential services log repositories, permissions, expiries and
+    # revocations — never a token, which is what makes them readable here.
+    codespace-auth-clients*|codespace-token*|codespace-sign*) ;;
     docker|docker.service|docker.socket) ;;
     sshd|sshd.service|nix-daemon|nix-daemon.service|nix-gc*|nix-optimise*) ;;
     vm-control.socket|vm-control@*) ;;
@@ -41,7 +44,8 @@ vm — ask the VM about itself, from inside a codespace
 
   vm status               running and booted system, checkout, failed units
   vm unit <unit>          systemctl status
-  vm journal <unit> [n]   the last n lines of its journal (default 50)
+  vm journal <unit> [n]   the last n lines of its journal (default 50);
+                          name@ for every instance of a template
   vm codespaces           codespace list --size
   vm volumes              docker volume ls
   vm df                   disk usage: filesystems, then docker's own view
@@ -125,9 +129,13 @@ dispatch() {
     journal)
       [ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: vm journal <unit> [lines]"; return 2; }
       allowed_unit "$1" || { echo "vm: '$1' is not on the list of readable units"; return 2; }
-      local n="${2:-50}"
+      local n="${2:-50}" u="$1"
       case "$n" in ''|*[!0-9]*) echo "vm: lines must be a number"; return 2 ;; esac
-      journalctl --no-pager -u "$1" -n "$n"
+      # A template's name, `codespace-token@`, means every instance: the
+      # broker and signer are a fresh instance per request. Globbed here
+      # because the client allows no `*` on the way in.
+      case "$u" in *@) u="$u*" ;; esac
+      journalctl --no-pager -u "$u" -n "$n"
       ;;
     # The VM's own launcher, the one you run there, rather than a copy built
     # into this script.

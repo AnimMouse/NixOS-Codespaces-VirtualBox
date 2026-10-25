@@ -19,7 +19,7 @@ current. This file only covers what *changes* when the workbench moves.
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
-| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity) and 5 (the VM itself on the app) are planned |
+| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) is planned |
 | Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). In daily use; the remaining Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
@@ -41,13 +41,16 @@ row where something was learnt the hard way.
 | Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
 | GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
+| Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only |
 
 ### Next
 
-- **Phase 4 of the GitHub App plan**: `customizations.codespaces.repositories`,
-  read-only tokens where you cannot write, revocation on `codespace rm`, `app`
-  as the default, and CLAUDE.md §8/§9 amended away from agent forwarding.
+- **Phase 4 of the GitHub App plan — two edges left**: whether a revoked
+  scoped token is really dead (the broker now logs 204 apart from 404), and
+  read-only planning against an organisation repository you can only read.
+  docs/GITHUB-APP.md §4.7. Any codespace still on an agent needs
+  `codespace rebuild` now that `app` is the default.
 - **Phase 5**: the VM itself on the app; the SSH key becomes signing-only.
 - **The kiosk launcher** has never launched Firefox. Its profile check runs
   `firefox -P`, which may open Firefox's profile manager instead.
@@ -282,7 +285,8 @@ typo and watching `SC2154` stop it.
   code-server/<version>/         code-server, unpacked once and mounted into every
                                  container at /mnt/code-server. Immutable (chattr +i)
   <name>/                        port, generated devcontainer.json, secrets, last_used,
-                                 dotfiles.git — its own snapshot of /persist/dotfiles
+                                 dotfiles.git — its own snapshot of /persist/dotfiles,
+                                 repositories.approved — other repositories you granted it
 /persist/code-server/           hub editor extensions and state (a leftover `pw`
                                  is no longer read — delete it)
 /persist/tls/                    editor CA, nginx's certificate, your browser's
@@ -303,7 +307,7 @@ typo and watching `SC2154` stop it.
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
-| `GITHUB_AUTH` | `legacy` | `app`: no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository, signing on the VM (docs/GITHUB-APP.md). Takes effect on `codespace rebuild` |
+| `GITHUB_AUTH` | `app` | no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository (and any approved in its devcontainer.json), signing on the VM (docs/GITHUB-APP.md). `legacy` forwards the agent instead. Takes effect on `codespace rebuild` |
 | `GIT_SIGNING` | `agent` | `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
 | `CONTAINER_GH_TOKEN` | `1` | set `GITHUB_TOKEN` in containers: the VM's `gh` token, or in `GITHUB_AUTH=app` a scoped one. `GH_TOKEN` is never set, so you can export your own over it |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |

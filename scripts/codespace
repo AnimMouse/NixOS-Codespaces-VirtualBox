@@ -40,6 +40,16 @@ CONTAINER_AUTH=/mnt/github
 # (modules/codespace-auth.nix). Written at every `up`; in /run, like the
 # tokens it governs.
 ENTITLEMENTS=/run/codespace-auth-state/entitlements
+# The GitHub App's credentials; github-app-login leaves the refresh token here.
+GITHUB_APP_DIR=@GITHUB_APP_DIR@
+# What a codespace's token may carry at most: the permissions the app itself
+# was registered with (docs/GITHUB-APP.md §4.1). A token asking for more is
+# refused by GitHub outright, so requests are clamped to this, and anything
+# else in customizations.codespaces.repositories is dropped with a note.
+APP_PERMISSIONS='{"contents":"write","pull_requests":"write","issues":"write","workflows":"write","actions":"read","metadata":"read"}'
+# The codespace's own repository gets this unless its devcontainer.json asks
+# for more, as in Codespaces. Not workflows: a codespace that edits CI says so.
+SOURCE_PERMISSIONS='{"contents":"write","metadata":"read","pull_requests":"write","issues":"write"}'
 # Where a codespace's own snapshot of the dotfiles appears, when
 # DOTFILES_REPOSITORY is a repository on the VM. See snapshot_dotfiles.
 CONTAINER_DOTFILES=/mnt/dotfiles
@@ -416,36 +426,155 @@ github_repo() {
 }
 
 # Drops every entitlement for codespace $1 except container $2's, if given —
-# those of containers it no longer has.
+# those of containers it no longer has — and revokes the tokens the broker
+# handed those containers. They would lapse within 8 hours anyway; a container
+# that is gone should not leave one usable that long.
 drop_entitlements() {
-  local f
+  local f cid
+  local -a gone=()
   [ -d "$ENTITLEMENTS" ] || return 0
   for f in "$ENTITLEMENTS"/*.json; do
     [ -e "$f" ] || continue
     [ "$f" = "$ENTITLEMENTS/${2:-}.json" ] && continue
-    [ "$(jq -r '.codespace // empty' "$f" 2>/dev/null)" = "$1" ] && rm -f "$f"
+    if [ "$(jq -r '.codespace // empty' "$f" 2>/dev/null)" = "$1" ]; then
+      rm -f "$f"
+      cid=$(basename "$f" .json)
+      gone+=("container=$cid")
+    fi
   done
+  [ "${#gone[@]}" -gt 0 ] || return 0
+  revoke_tokens "${gone[@]}"
+}
+
+# Asks the broker to revoke what it handed these containers. Through the
+# broker, not here: it holds the app's secret and the tokens, and only a
+# caller on the VM — never one in a container — may ask it to revoke.
+revoke_tokens() {
+  local q out
+  [ -S "$AUTH_DIR/token.sock" ] || return 0
+  q=$(IFS='&'; echo "$*")
+  out=$(curl -sS --max-time 30 --unix-socket "$AUTH_DIR/token.sock" -X POST \
+    "http://vm/revoke?$q" 2>&1) || { note "note: could not revoke tokens: $out"; return 0; }
+  case "$out" in
+    "revoked 0") ;;
+    revoked*) note "${out/revoked/revoked GitHub token(s):}" ;;
+    *) note "note: revoking tokens: $out" ;;
+  esac
   return 0
 }
 
 # What container $3 of codespace $1 may get a token for: its own repository,
-# from the checkout's origin, as in real Codespaces. Workflows is left out —
-# a codespace that edits CI asks for it (docs/GITHUB-APP.md §4.6, phase 4).
-# The broker trusts this file and nothing a request says.
+# from the checkout's origin, as in real Codespaces, plus $4 — the other
+# repositories its devcontainer.json asked for and you approved
+# (granted_repositories). The broker trusts this file and nothing a request
+# says.
 write_entitlement() {
-  local name=$1 ws=$2 cid=$3 repo tmp
+  local name=$1 ws=$2 cid=$3 extra=${4:-'{}'} repo tmp
   [ -d "$ENTITLEMENTS" ] || return 0
   repo=$(github_repo "$ws")
   drop_entitlements "$name" "$cid"
   tmp=$(mktemp "$ENTITLEMENTS/.XXXXXX")
-  jq -n --arg n "$name" --arg r "$repo" '{
-    codespace: $n,
-    repositories: (if $r == "" then {} else {($r): {
-      contents: "write", metadata: "read", pull_requests: "write", issues: "write"
-    }} end)
-  }' > "$tmp"
+  jq -n --arg n "$name" --arg r "$repo" --argjson x "$extra" \
+    --argjson d "$SOURCE_PERMISSIONS" '
+    def rank: if . == "write" then 2 elif . == "read" then 1 else 0 end;
+    def widest($a; $b): reduce ($b | to_entries[]) as $e ($a;
+      if (.[$e.key] // "" | rank) < ($e.value | rank) then .[$e.key] = $e.value else . end);
+    {
+      codespace: $n,
+      source: $r,
+      repositories: (
+        $x + (if $r == "" then {} else
+          {($r): widest($d; ($x | to_entries | map(select(.key | ascii_downcase == ($r | ascii_downcase)))
+                              | .[0].value // {}))} end)
+        # One key per repository: the source under its own spelling only.
+        | with_entries(select(.key == $r or (.key | ascii_downcase) != ($r | ascii_downcase)))
+      )
+    }' > "$tmp"
   mv "$tmp" "$ENTITLEMENTS/$cid.json"
   echo "$repo"
+}
+
+# customizations.codespaces.repositories from the config `up` will use, read
+# by the CLI itself so JSONC and --override-config are handled as `up` handles
+# them. Normalised as Codespaces reads it — "read-all", "write-all" or a map of
+# permissions — then clamped to what the app has, with metadata always read.
+# Only repositories of the same owner as the codespace's own, as in
+# Codespaces, which /token/scoped's single target suits anyway. Echoes the
+# result as JSON; what was dropped goes to stderr.
+requested_repositories() {
+  local ws=$1 override=$2 source=$3 cfg out
+  local -a ra=(read-configuration --workspace-folder "$ws")
+  [ -n "$override" ] && ra+=(--override-config "$override")
+  if ! cfg=$(devcontainer "${ra[@]}" 2>/dev/null | tail -1) || [ -z "$cfg" ]; then
+    note "note: could not read the devcontainer.json for customizations.codespaces.repositories"
+    echo '{}'
+    return 0
+  fi
+  out=$(printf '%s' "$cfg" | jq -c --argjson cap "$APP_PERMISSIONS" --arg src "$source" '
+    def rank: if . == "write" then 2 elif . == "read" then 1 else 0 end;
+    (.configuration.customizations.codespaces.repositories // {}) as $req
+    | ($src | split("/")[0] | ascii_downcase) as $owner
+    | reduce ($req | to_entries[]) as $e ({granted: {}, dropped: []};
+        ($e.value.permissions // null) as $p
+        | if ($e.key | test("^[A-Za-z0-9_.-]+/([A-Za-z0-9_.-]+|\\*)$") | not) then
+            .dropped += ["\($e.key): not owner/name or owner/*"]
+          elif $src == "" then
+            .dropped += ["\($e.key): this codespace has no GitHub repository of its own"]
+          elif ($e.key | split("/")[0] | ascii_downcase) != $owner then
+            .dropped += ["\($e.key): not owned by \($src | split("/")[0]), as Codespaces also requires"]
+          else
+            (if $p == "read-all" then $cap | map_values("read")
+             elif $p == "write-all" then $cap
+             elif ($p | type) == "object" then
+               $p | with_entries(select(.value == "read" or .value == "write"))
+             else null end) as $want
+            | if $want == null then
+                .dropped += ["\($e.key): permissions must be read-all, write-all or a map"]
+              else
+                .dropped += [$want | keys[] | select($cap[.] == null)
+                             | "\($e.key): \(.) — the app does not have that permission"]
+                | .granted[$e.key] = ({metadata: "read"} + ($want
+                    | with_entries(select($cap[.key] != null)
+                        | if (.value | rank) > ($cap[.key] | rank) then .value = $cap[.key] else . end)))
+              end
+          end)') || { note "note: could not parse customizations.codespaces.repositories"; echo '{}'; return 0; }
+  printf '%s' "$out" | jq -r '.dropped[] | "note: ignoring \(.)"' >&2
+  printf '%s' "$out" | jq -c '.granted'
+}
+
+# Which of the requested repositories this codespace gets. The container can
+# edit its own devcontainer.json — it is in the checkout — so a request is not
+# a grant: anything not approved before is shown here and asked about, as
+# Codespaces asks when it creates a codespace. With no terminal to ask at, it
+# is left out and `up` says so. Approvals are kept on the VM, where the
+# container cannot reach them, and replaced by what is granted each time, so a
+# repository dropped from the config must be approved again to come back.
+granted_repositories() {
+  local name=$1 requested=$2 file="$STATE/$1/repositories.approved"
+  local approved new granted ans
+  approved=$(jq -c . "$file" 2>/dev/null || echo '{}')
+  new=$(jq -cn --argjson r "$requested" --argjson a "$approved" \
+    '$r | with_entries(select($a[.key] != .value))')
+  granted=$(jq -cn --argjson r "$requested" --argjson a "$approved" \
+    '$r | with_entries(select($a[.key] == .value))')
+  if [ "$new" != '{}' ]; then
+    note "$name's devcontainer.json asks for access beyond its own repository:"
+    jq -r 'to_entries[] | "      \(.key): \(.value | to_entries | map("\(.key) \(.value)") | join(", "))"' \
+      <<<"$new" >&2
+    if [ -t 0 ] && [ -t 2 ]; then
+      read -r -p "    Grant these? [y/N] " ans
+      case "$ans" in
+        y|Y|yes) granted=$requested ;;
+        *) note "not granted; 'codespace up $name' again to be asked again" ;;
+      esac
+    else
+      note "not granted: no terminal to ask at. Run 'codespace up $name' from a shell to approve."
+    fi
+  fi
+  if [ "$granted" != "$approved" ]; then
+    printf '%s\n' "$granted" > "$file.new" && mv "$file.new" "$file"
+  fi
+  echo "$granted"
 }
 
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
@@ -592,14 +721,26 @@ cmd_up() {
   # the container in any form. An ssh-agent cannot tell signing from logging
   # in, so a forwarded agent lets a container push to every repository; here
   # git pushes over https with a token scoped to this codespace's repository,
-  # from the VM's broker, and commits are signed on the VM. legacy, the
-  # default for now, is everything below as it was.
-  local gh_auth="${GITHUB_AUTH:-legacy}"
+  # from the VM's broker, and commits are signed on the VM. The default since
+  # phase 4. legacy is everything below as it was: the agent or key forwarded,
+  # reaching every repository the key can.
+  local gh_auth="${GITHUB_AUTH:-app}" granted='{}'
   case "$gh_auth" in
     legacy) ;;
     app)
       [ -S "$AUTH_DIR/token.sock" ] \
         || die "GITHUB_AUTH=app, but the token broker is not running ($AUTH_DIR/token.sock) — is modules/codespace-auth.nix applied?"
+      # Not fatal: the codespace still comes up, signs, and reads public
+      # repositories — but nothing in it can push until the VM is authorised.
+      # Better than quietly handing it the SSH key instead.
+      if [ ! -s "$GITHUB_APP_DIR/refresh_token" ]; then
+        note "warning: the GitHub App is not authorised on this VM yet, so git and gh in"
+        note "         this codespace cannot authenticate. Run: github-app-login"
+        note "         (docs/GITHUB-APP.md §4.1 to register the app first; GITHUB_AUTH=legacy for the old way)"
+      fi
+      # Asked before the build, which can take minutes, rather than after.
+      granted=$(requested_repositories "$ws" "$override" "$(github_repo "$ws")")
+      [ "$granted" = '{}' ] || granted=$(granted_repositories "$name" "$granted")
       case "$mode" in
         auto|none) ;;
         *) note "note: GITHUB_AUTH=app — ignoring GIT_SSH_MODE=$mode; no SSH credential goes into a container" ;;
@@ -860,7 +1001,7 @@ cmd_up() {
   # What this container may ask the token broker for. Written here, early,
   # because GITHUB_TOKEN below is fetched through the broker in app mode.
   local token_repo
-  token_repo=$(write_entitlement "$name" "$ws" "$cid")
+  token_repo=$(write_entitlement "$name" "$ws" "$cid" "$granted")
 
   # The client lives in the mounted directory, so a VM rebuild updates it in
   # every container; the link puts it on PATH. Recreated on every `up`, since
@@ -1047,6 +1188,7 @@ cmd_up() {
       git config --system --unset-all url.git@github.com:.insteadOf 2>/dev/null
       git config --system --replace-all credential.https://github.com.helper "" || exit 1
       git config --system --add credential.https://github.com.helper "$a/git-credential-codespace" || exit 1
+      git config --system credential.https://github.com.useHttpPath true || exit 1
       git config --system --replace-all url.https://github.com/.insteadOf git@github.com: || exit 1
       git config --system --add url.https://github.com/.insteadOf ssh://git@github.com/ || exit 1
       [ -L /usr/local/bin/gh ] && rm -f /usr/local/bin/gh
@@ -1077,6 +1219,7 @@ cmd_up() {
   else
     docker exec -u root "$cid" sh -c '
       git config --system --unset-all credential.https://github.com.helper 2>/dev/null
+      git config --system --unset-all credential.https://github.com.useHttpPath 2>/dev/null
       git config --system --unset-all url.https://github.com/.insteadOf 2>/dev/null
       [ "$(readlink /usr/local/bin/gh 2>/dev/null)" = "$1/gh-codespace" ] && rm -f /usr/local/bin/gh
       exit 0
@@ -1290,6 +1433,10 @@ cmd_up() {
     else
       echo "  git: no GitHub repository, so no token — and no SSH credential in here"
     fi
+    # The broker narrows these to read-only where you cannot push.
+    [ "$granted" = '{}' ] || jq -r 'to_entries[]
+      | "       and \(.key): \(.value | to_entries | map(select(.key != "metadata")) | map("\(.key) \(.value)") | join(", "))"' \
+      <<<"$granted"
     [ "$gh_shim" = 1 ] && echo "  gh:  a fresh scoped token on every run"
   elif [ -n "$gh_token" ]; then
     echo "  gh:  authenticated with the VM's token"
