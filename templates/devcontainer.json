@@ -13,6 +13,15 @@
   // under us once. No hyphen: `ubuntu-26.04` is a 404.
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu26.04",
 
+  // The image's own user, stated rather than left to its metadata, because two
+  // paths below are written out for it: the Claude volume's mount target and
+  // CLAUDE_CONFIG_DIR, both /home/vscode/.claude. Neither can be derived from
+  // $HOME — ${containerEnv:HOME} works only in remoteEnv, which the launcher's
+  // `docker exec`-started editor never sees. Change the image to one with
+  // another user (Codespaces' universal image is `codespace`, home
+  // /home/codespace) and change all three together.
+  "remoteUser": "vscode",
+
   // A real init as PID 1, so the processes an editor and its terminals leave
   // behind are reaped instead of piling up as zombies over a long session.
   "init": true,
