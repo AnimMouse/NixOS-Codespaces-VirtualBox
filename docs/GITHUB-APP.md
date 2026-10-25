@@ -376,6 +376,21 @@ Read-only when you cannot write to the source repository, as in Codespaces.
 - **Revocation**: `codespace rm` drops the codespace's entitlement and
   revokes its cached token (`DELETE /applications/{client_id}/token`). Scoped
   tokens expire on their own regardless.
+- **Organisations must install the app.** A user access token reaches only
+  where both you and the app can: acting *as* you is not acting *everywhere*
+  you can. So an org's repositories need the app installed on that org — by
+  an owner, or approved by one — after making the app public (app settings →
+  Advanced). The existing authorisation then covers it; nothing to redo on the
+  VM, and `/token/scoped` takes the org as its `target`. SAML-enforcing orgs
+  may also need an active SSO session.
+  - `gh auth login` and Git Credential Manager need no install because they are
+    **OAuth Apps**: their tokens reach everything you can, in every org, and
+    cannot be narrowed to one repository — the breadth this plan removes.
+  - Real Codespaces needs none either: it is GitHub's own app, governed by the
+    org's Codespaces settings instead of an installation — a privilege third-
+    party apps do not get.
+  - For an org that will not install it: `export GH_TOKEN=<a PAT>` in that
+    codespace, and clone it on the VM with the PAT by hand (README).
 
 ---
 
@@ -403,6 +418,64 @@ Each phase ships on its own and leaves the system working.
 4. **Parity.** `customizations.codespaces.repositories`, read-only on repos you
    cannot write, revocation on `rm`. Amend CLAUDE.md §8 (the agent-forwarding
    rows) and §9, add the gotchas found, and make `app` the default.
+5. **The VM itself on the app — plan.** The SSH key stops authenticating
+   anywhere and only signs. See §6.1.
+
+### 6.1 Phase 5 — the VM authenticates with the app too
+
+Today the VM pushes and pulls with the SSH key through the agent, and `gh` on
+it uses an OAuth login that reaches everything. Phase 5 moves both onto the
+app, leaving the key one job: signing.
+
+**Design**
+
+- **The broker answers the VM.** A caller in no container, running as `dev`,
+  gets the **account-wide** user token — every repository the app is installed
+  on — rather than a scoped one: the VM is trusted, and holds the refresh token
+  anyway. It must be the broker, not a second client: two processes refreshing
+  independently would rotate each other's refresh token out. Containers are
+  still known by their cgroup and can never get it. Optionally narrower:
+  with `credential.useHttpPath`, git names the repository, and the helper can
+  ask for a token scoped to just that one, so even the VM holds no more than
+  an operation needs.
+- **The VM's git config flips** (`home/dev.nix`): the https→SSH rewrite goes,
+  SSH→https replaces it so checkouts with `git@github.com:` remotes keep
+  working, and a credential helper asks the broker.
+- **gh on the VM** gets a fresh token per run as in containers, and the
+  `gh auth login` OAuth session is removed.
+- **On GitHub, the key becomes signing-only**: removed as an Authentication
+  key, kept as a Signing key. That is what disables SSH auth — a leaked key
+  could still sign, and could push nowhere.
+
+**Day to day**
+
+| | Now | After |
+|---|---|---|
+| `git push`, `git pull`, `gh` on the VM | SSH key, through the agent | app token, fetched by the helper |
+| After a reboot | `ssh-auth` before pushing | `ssh-auth` only before *signing*; pull and push work at once |
+| `rebuild --pull` | SSH | https; the flake repository is public, so no credential at all |
+| `codespace up github.com/…` | clones over SSH | clones over https with the app token |
+| Every ~6 months unused | — | `github-app-login` again, if the refresh token lapsed |
+
+**To accept or solve**
+
+- Repositories under an account that has not installed the app become
+  unreachable from the VM too — a PAT per command for those.
+- The app's permissions become the ceiling everywhere: Contents, Pull
+  requests, Issues, Workflows, Actions read, Metadata. Repository settings,
+  deletion or secrets need a permission added. **Verify** whether creating a
+  repository needs Administration write, before relying on `gh repo create`.
+- A lapsed or revoked authorisation cuts the VM off from GitHub until
+  `github-app-login`, which needs only a browser. A fresh install is
+  unaffected: it clones the public flake anonymously.
+- Signing still needs the agent unlocked, as now. Only authentication moves.
+
+**Checks**
+
+- [ ] `ssh -T git@github.com` from the VM is denied once the key is
+      signing-only, while commits made on the VM still show Verified.
+- [ ] `git push` and `gh pr list` on the VM work with no agent loaded.
+- [ ] A container still cannot get the account-wide token.
 
 ### Rollback
 
