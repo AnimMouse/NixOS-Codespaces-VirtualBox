@@ -719,7 +719,9 @@ real Codespaces. Containers made before the switch keep whatever credential
 they were created with, and `up` says so: `codespace rebuild` each one.
 
 The token is in the environment as `GITHUB_TOKEN`, the name real Codespaces
-uses, set at `up` (and refreshed for every `gh` run by the shim). `GH_TOKEN` is
+uses: fetched fresh by every login shell, and by the shim for every `gh` run.
+git never reads it — the credential helper asks the VM on each push — so only
+a process already running for 8 hours can hold an expired one. `GH_TOKEN` is
 yours: `export GH_TOKEN=<a PAT>` when you need more than the codespace's own
 repository, and both `gh` and `git` use it — gh ranks `GH_TOKEN` first, and the
 credential helper honours it. `unset GH_TOKEN` drops back to the scoped token.

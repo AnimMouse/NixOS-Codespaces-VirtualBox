@@ -1173,6 +1173,22 @@ cmd_up() {
     # login, not out here.
     # shellcheck disable=SC2016
     echo '[ -r "$HOME/.codespace-secrets" ] && . "$HOME/.codespace-secrets"'
+    # App mode: a fresh GITHUB_TOKEN for every login shell, over the one saved
+    # at `up`. That one lapses 8 hours after `up`, and every new terminal would
+    # load it from .codespace-secrets until the next `up`. git and gh never
+    # read it — the credential helper and the shim ask the broker themselves —
+    # so this is for whatever reads the variable. Milliseconds over the socket;
+    # on any failure the saved token stays. Only processes already running
+    # past 8 hours can hold a dead one.
+    if [ "$gh_auth" = app ] && [ "$have_auth" = 1 ]; then
+      # shellcheck disable=SC2016
+      printf '%s\n' \
+        "if [ -S $CONTAINER_AUTH/token.sock ] && command -v curl >/dev/null 2>&1; then" \
+        "  _cs_token=\$(curl -fsS --max-time 3 --unix-socket $CONTAINER_AUTH/token.sock http://vm/token 2>/dev/null) \\" \
+        '    && [ -n "$_cs_token" ] && export GITHUB_TOKEN="$_cs_token"' \
+        '  unset _cs_token' \
+        'fi'
+    fi
   } > "$envfile"
   docker cp "$envfile" "$cid:/etc/profile.d/codespace.sh" >/dev/null
   docker exec -u root "$cid" chmod 0644 /etc/profile.d/codespace.sh

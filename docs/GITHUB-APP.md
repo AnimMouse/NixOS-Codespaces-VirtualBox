@@ -319,8 +319,14 @@ prints the broker's reason to stderr first.
   lifts a codespace beyond its repository exactly as in a real Codespace. The
   credential helper honours `GH_TOKEN` too, so git and gh never disagree, and
   the shim does not ask the broker while it is set. Tools that read
-  `GITHUB_TOKEN` once get a scoped token that may lapse after 8 hours; a new
-  shell, `gh auth token`, or the next `up` gives a fresh one.
+  `GITHUB_TOKEN` once get a scoped token that may lapse after 8 hours. Every
+  login shell fetches a fresh one from the broker over the saved one (written
+  to `/etc/profile.d/codespace.sh` by the launcher; on failure the saved one
+  stays), so a new terminal is always current; only a process already running
+  past 8 hours holds an old one. git and gh are unaffected either way — the
+  helper and the shim ask the broker per operation. `gh auth git-credential`
+  as git's helper was considered and declined: one more hop to the same
+  token, and git would then need gh installed, which a `plain` image lacks.
 - **Removed from containers**: the forwarded agent, keyfile mode, the
   private key in every form, the https→ssh rewrite, and `GIT_SSH_COMMAND`.
   `/mnt/git-ssh` keeps the public key, identity, `allowed_signers` and
