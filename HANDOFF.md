@@ -87,6 +87,10 @@ If you touch any of these, you can now test them properly rather than by proxy.
   the agent hidden was signed by the VM, logged against the container's ID,
   and shows Verified on GitHub. The dotfiles were changed to leave signing
   alone when the VM does it.
+- **Dotfiles from `/persist/dotfiles`.** A new codespace cloned its own
+  snapshot (`origin` is `/mnt/dotfiles`, at the VM repo's committed HEAD) and
+  ran `install.sh`; the whole dotfiles step took 67 ms against 3.5 s from
+  GitHub. Its container layer was 440 KB, with code-server shared.
 - **Shared code-server.** A new codespace links
   `/mnt/code-server/4.143.1/bin/code-server` from the VM's store, and root in
   the container gets `Permission denied` writing there; `lsattr` shows the
@@ -114,13 +118,6 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-- **Dotfiles from `/persist/dotfiles`.** Tested in a container against the
-  real dotfiles repo: the snapshot holds the committed HEAD only, the CLI's own
-  `git clone --depth 1` from it works, a new commit appears in the next
-  snapshot, and a failed clone keeps the previous one. On the VM, after
-  moving the repo and setting `DOTFILES_REPOSITORY=/persist/dotfiles`: `up` on
-  a new codespace prints `dotfiles: snapshot of …`, and the create's dotfiles
-  step takes well under the 3.5 s it did.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
