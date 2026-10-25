@@ -980,10 +980,12 @@ cmd_up() {
     *" /tmp/ssh-agent.sock "*)     git_ssh="agent"; agent_sock=/tmp/ssh-agent.sock ;;
     # The whole directory, so the private key is there and usable.
     *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
-    # Only the public half — no way to authenticate from in here.
-    *" /mnt/git-ssh/id_ed25519.pub "*) git_ssh="locked" ;;
+    # Only the public half — no way to authenticate from in here. Every app
+    # mode container is like this, for verifying signatures; in legacy it
+    # means the key was locked, or GIT_SSH_MODE=none, when it was created.
+    *" /mnt/git-ssh/id_ed25519.pub "*) git_ssh="pubkey" ;;
   esac
-  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != locked ]; then
+  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != pubkey ]; then
     note "note: this container was created with git credentials '${git_ssh:-none}';"
     note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
   fi
@@ -1425,11 +1427,25 @@ cmd_up() {
   echo "  $name is up"
   echo "  https://localhost:$port/"
   [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
-  [ "$signing" = vm ] && echo "  git: commits signed on the VM (GIT_SIGNING=vm)"
+  if [ "$signing" = vm ]; then
+    # What the signing service will use: the agent at the stable path it is
+    # given (modules/codespace-auth.nix), or the key file if it has no
+    # passphrase. Not this shell's SSH_AUTH_SOCK, which may be another agent.
+    local label="" vm_agent
+    vm_agent="/run/user/$(id -u)/ssh-agent"
+    [ "$gh_auth" = legacy ] && label=" (GIT_SIGNING=vm)"
+    if SSH_AUTH_SOCK=$vm_agent ssh-add -l >/dev/null 2>&1 \
+        || { [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; }; then
+      echo "  git: commits signed on the VM$label"
+    else
+      echo "  git: commits signed on the VM$label — but the key is locked: run 'ssh-auth' before committing"
+    fi
+  fi
   [ "$gh_auth" = legacy ] && [ -n "$token_repo" ] && [ "$have_auth" = 1 ] \
     && echo "  token: scoped to $token_repo, from /mnt/github/token.sock (GITHUB_AUTH=app to use it)"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
-  [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
+  [ "$gh_auth" = legacy ] && [ "$git_ssh" = pubkey ] && [ "$key_locked" = 1 ] \
+    && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
   if [ "$gh_auth" = app ] && [ "$have_auth" = 1 ]; then
     if [ -n "$token_repo" ]; then
       echo "  git: https, with a token scoped to $token_repo — no SSH credential in here"
