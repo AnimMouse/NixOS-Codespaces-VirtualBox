@@ -36,6 +36,9 @@ CONTAINER_CS=/mnt/code-server
 # now, scoped GitHub tokens later. One directory for every codespace.
 AUTH_DIR=/run/codespace-auth
 CONTAINER_AUTH=/mnt/github
+# Where a codespace's own snapshot of the dotfiles appears, when
+# DOTFILES_REPOSITORY is a repository on the VM. See snapshot_dotfiles.
+CONTAINER_DOTFILES=/mnt/dotfiles
 # The VM control socket's directory (modules/vm-control.nix), and where it
 # appears in a container. Plumbing, so under /mnt beside /mnt/git-ssh.
 VM_CONTROL_DIR=/run/vm-control
@@ -368,6 +371,31 @@ ensure_code_server() {
   echo "$v"
 }
 
+# Clones the committed HEAD of the VM's dotfiles repository $2 into codespace
+# $1's own state directory, as a bare repo, and echoes its path.
+#
+# A snapshot per codespace rather than the repository itself mounted into every
+# container: the CLI cannot mount read-only, and the dotfiles' install.sh runs
+# on every create — so a shared, writable copy would let one compromised
+# codespace plant a script that every later one runs. Pointing
+# DOTFILES_REPOSITORY into /workspaces/refs would do exactly that. A container
+# can change its own snapshot, which nothing else ever reads.
+#
+# On /persist, beside the codespace's other state, not /run: docker will not
+# start a container whose bind-mount source is missing, and this one must
+# outlive a reboot. Made by rename, so a failed clone leaves the old one.
+snapshot_dotfiles() {
+  local name=$1 src=$2 snap="$STATE/$1/dotfiles.git"
+  rm -rf "$snap.new"
+  # file:// so --depth applies; a plain path makes git ignore it for a local
+  # clone. Committed HEAD only: an uncommitted edit is not in the snapshot.
+  git clone --quiet --bare --depth 1 "file://$src" "$snap.new" >&2 \
+    || die "could not snapshot the dotfiles from $src"
+  rm -rf "$snap"
+  mv "$snap.new" "$snap"
+  echo "$snap"
+}
+
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
 container_any() { docker ps -aq --filter "label=codespace=$1" | head -1; }
 
@@ -670,8 +698,37 @@ cmd_up() {
     args+=(--remote-env "GIT_CONFIG_VALUE_0=https://github.com/")
   fi
 
+  # DOTFILES_REPOSITORY is a URL for the CLI to clone inside the container —
+  # or a git repository on the VM, such as /persist/dotfiles. That one is
+  # snapshotted for this codespace (snapshot_dotfiles) and mounted at
+  # $CONTAINER_DOTFILES; the CLI then clones from there, locally, in
+  # milliseconds, with no network and no credential — a private repository
+  # needs no token. Commit in the VM's repository and the next new codespace
+  # has it; no push needed.
   if [ -n "${DOTFILES_REPOSITORY:-}" ]; then
-    args+=(--dotfiles-repository "$DOTFILES_REPOSITORY")
+    local dotfiles_repo=$DOTFILES_REPOSITORY snap
+    case "$DOTFILES_REPOSITORY" in
+      /*)
+        if git -C "$DOTFILES_REPOSITORY" rev-parse --git-dir >/dev/null 2>&1; then
+          snap="$STATE/$name/dotfiles.git"
+          # Only when a container is about to be created: the dotfiles run
+          # once per container, so a fresh snapshot for a plain `up` of an
+          # existing one would be wasted. Unless it is missing, which would
+          # stop that container starting at all.
+          if [ "$recreate" = recreate ] || [ -z "$(container_any "$name")" ] || [ ! -d "$snap" ]; then
+            snap=$(snapshot_dotfiles "$name" "$DOTFILES_REPOSITORY") || exit 1
+            note "dotfiles: snapshot of $DOTFILES_REPOSITORY at $(git -C "$snap" log -1 --format='%h %s' 2>/dev/null)"
+          fi
+          args+=(--mount "type=bind,source=$snap,target=$CONTAINER_DOTFILES")
+          dotfiles_repo=$CONTAINER_DOTFILES
+        else
+          # Not a repository here: assume a path meant for inside the
+          # container, and pass it on as before.
+          note "note: DOTFILES_REPOSITORY=$DOTFILES_REPOSITORY is not a git repository on the VM — passing it to the container as is"
+        fi
+        ;;
+    esac
+    args+=(--dotfiles-repository "$dotfiles_repo")
     [ -n "${DOTFILES_INSTALL_COMMAND:-}" ] && args+=(--dotfiles-install-command "$DOTFILES_INSTALL_COMMAND")
   fi
 

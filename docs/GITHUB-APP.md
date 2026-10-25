@@ -132,8 +132,8 @@ names its Docker container (`docker-<id>.scope`). Nothing inside a container
 can forge either. Built that way for signing, where it only labels the log.
 
 **Verify before tokens depend on it (phase 2):**
-- [ ] On the VM, the cgroup of a container's process names its container ID.
-      The signing log should already show `container <id>`, not `pid <n>`.
+- [x] On the VM, the cgroup of a container's process names its container ID:
+      the signing log showed `signed 1461 bytes for container 8d074aff3202`.
 - [ ] A PID can be reused between `connect()` and reading its cgroup. For
       signing that only mislabels a log line; for tokens it must not happen —
       use `SO_PEERPIDFD` (kernel ≥ 6.5) and re-check the pidfd after reading.
@@ -244,9 +244,10 @@ sign, `git tag -s` (same invocation), a signature asked for directly verifying
 only in namespace `git`, and `git log --show-signature` passing through to
 `ssh-keygen`.
 
-**Verify:**
-- [ ] A signature made this way verifies as "Verified" on GitHub, as one made
-      with the forwarded agent does today.
+*Checked* on the VM: a commit made in a codespace with `SSH_AUTH_SOCK` unset —
+so nothing in the container could sign — went through the client (`GIT_TRACE`
+shows it run), was logged by the service against the container's ID, and
+shows **Verified** on GitHub.
 
 ### 4.5 The rest of the container side
 
@@ -310,12 +311,11 @@ Read-only when you cannot write to the source repository, as in Codespaces.
 - **Private dotfiles repo.** `AnimMouse/dotfiles-codespaces` answers 404 to an
   anonymous API request, so it is private (*checked*). The dotfiles clone runs
   first in the container, before anything here exists (CLAUDE.md §8), and a
-  token scoped to the project would not cover it anyway. Options, to decide
-  before phase 3:
-  1. make it public — it holds no values by design (§6);
-  2. the launcher passes a one-shot token scoped to the dotfiles repo with
-     Contents read, via `--secrets-file` and a `--remote-env` credential
-     helper.
+  token scoped to the project would not cover it anyway. **Resolved**: with
+  `DOTFILES_REPOSITORY=/persist/dotfiles`, the launcher snapshots the repo on
+  the VM and the container clones from a local mount — no network, no
+  credential, so private needs nothing. The VM's own checkout pulls and pushes
+  with the VM's full credentials.
 - **Reference clones** in `/workspaces/refs` can no longer push. Public ones
   still clone (no credential is asked for). Clone and push those from the VM,
   which keeps its full credentials.

@@ -82,6 +82,11 @@ If you touch any of these, you can now test them properly rather than by proxy.
   (`codespace-proxy@` has since been replaced by nginx.)
 - **`rebuild` stops when nothing changed:** a second `rebuild` printed
   `no changes: already running …` and did not switch.
+- **VM-side commit signing** (`GIT_SIGNING=vm`, phase 1 of
+  [docs/GITHUB-APP.md](docs/GITHUB-APP.md)). A commit made in a codespace with
+  the agent hidden was signed by the VM, logged against the container's ID,
+  and shows Verified on GitHub. The dotfiles were changed to leave signing
+  alone when the VM does it.
 - **Shared code-server.** A new codespace links
   `/mnt/code-server/4.143.1/bin/code-server` from the VM's store, and root in
   the container gets `Permission denied` writing there; `lsattr` shows the
@@ -109,13 +114,13 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-- **VM-side commit signing** (`GIT_SIGNING=vm`, phase 1 of
-  [docs/GITHUB-APP.md](docs/GITHUB-APP.md)). Tested in a container with the real
-  handler behind socat: signing from the agent and from an unencrypted key
-  file, a clear "run ssh-auth" when locked, tags, namespace always `git`, and
-  `git log --show-signature` verifying. On the VM, with `GIT_SIGNING=vm` and a
-  `codespace rebuild`: a commit in the container is "Verified" on GitHub, and
-  `journalctl -u 'codespace-sign@*'` names the container by its ID.
+- **Dotfiles from `/persist/dotfiles`.** Tested in a container against the
+  real dotfiles repo: the snapshot holds the committed HEAD only, the CLI's own
+  `git clone --depth 1` from it works, a new commit appears in the next
+  snapshot, and a failed clone keeps the previous one. On the VM, after
+  moving the repo and setting `DOTFILES_REPOSITORY=/persist/dotfiles`: `up` on
+  a new codespace prints `dotfiles: snapshot of …`, and the create's dotfiles
+  step takes well under the 3.5 s it did.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
@@ -240,7 +245,8 @@ typo and watching `SC2154` stop it.
   secrets                        KEY=value, mode 0600
   code-server/<version>/         code-server, unpacked once and mounted into every
                                  container at /mnt/code-server. Immutable (chattr +i)
-  <name>/                        port, generated devcontainer.json, secrets, last_used
+  <name>/                        port, generated devcontainer.json, secrets, last_used,
+                                 dotfiles.git — its own snapshot of /persist/dotfiles
 /persist/code-server/           hub editor extensions and state (a leftover `pw`
                                  is no longer read — delete it)
 /persist/tls/                    editor CA, nginx's certificate, your browser's
@@ -257,7 +263,7 @@ typo and watching `SC2154` stop it.
 
 | Key | Default | |
 |---|---|---|
-| `DOTFILES_REPOSITORY` | — | passed to `devcontainer up` |
+| `DOTFILES_REPOSITORY` | — | a URL, cloned inside the container; or a git repo on the VM such as `/persist/dotfiles`, snapshotted per codespace and mounted at `/mnt/dotfiles` |
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |

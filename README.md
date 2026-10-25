@@ -168,15 +168,21 @@ convenient.
 
 ## 4. Point the launcher at your dotfiles
 
-Optional. Create `/persist/codespace/config`:
+Optional. Keep the repo on the VM, beside this one, and point the launcher at
+it in `/persist/codespace/config`:
 
 ```bash
-DOTFILES_REPOSITORY=https://github.com/AnimMouse/dotfiles-codespaces
+git clone git@github.com:AnimMouse/dotfiles-codespaces /persist/dotfiles
+
+DOTFILES_REPOSITORY=/persist/dotfiles
 DOTFILES_INSTALL_COMMAND=install.sh
 ```
 
-Private repos work — the launcher hands the clone your SSH key. See
-[Dotfiles](#dotfiles).
+Each new codespace gets its own snapshot of the repo's committed `HEAD` —
+milliseconds, no network, no credential, so a private repo needs nothing
+special. Edit it with `codespace up /persist/dotfiles` and commit; the next new
+codespace has the change, with no push needed. A URL works too, cloned inside
+the container as before. See [Dotfiles](#dotfiles).
 
 That is the whole setup. `codespace up <repo>` from here.
 
@@ -760,7 +766,22 @@ this order:
 2. `$SSH_ANIMMOZ_KEY` — a Codespaces secret
 3. neither — signing off, so commits still succeed
 
-**Private dotfiles repos work.** Worth knowing why that needed doing: the
+**On the VM: `DOTFILES_REPOSITORY=/persist/dotfiles`.** A path to a git
+repository on the VM is snapshotted per codespace: at create, the launcher
+clones the committed `HEAD` into `/persist/codespace/<name>/dotfiles.git` and
+mounts that at `/mnt/dotfiles`, and the CLI clones from there.
+
+A snapshot, not the repo itself mounted, and not a clone kept in
+`/persist/refs`: `install.sh` runs on every create, and nothing can be mounted
+read-only, so a shared copy would let one compromised codespace plant a script
+that every later one runs. A codespace can change only its own snapshot. For
+the same reason, never keep anything in `/persist/refs` that runs on its own —
+every codespace can write there.
+
+Uncommitted edits are not in the snapshot; commit, then `codespace new` or
+`codespace rebuild`. A codespace keeps the snapshot it was created with.
+
+**Private dotfiles repos work** from a URL too. Worth knowing why that needed doing: the
 dotfiles clone runs *inside* the container and is the first thing to run there,
 before any credential exists. A private repo over https fails with `could not
 read Username`, and `devcontainer up` **still reports success** — so you get a
