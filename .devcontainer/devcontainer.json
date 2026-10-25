@@ -10,6 +10,11 @@
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu26.04",
 
   "features": {
+    // gh, for the GitHub API from inside this codespace — and for testing the
+    // GitHub App's scoped token through it (docs/GITHUB-APP.md), which needs
+    // gh to be the same one other codespaces get from the template.
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+
     // Single-user install. A container has no systemd, so the multi-user
     // daemon has nothing to run under.
     "ghcr.io/devcontainers/features/nix:1": {
