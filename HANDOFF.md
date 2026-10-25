@@ -281,6 +281,7 @@ typo and watching `SC2154` stop it.
 rebuild --pull                  # git pull, then nixos-rebuild switch
 rebuild [--force]               # stops at "no changes" unless forced
 ssh-auth                        # unlock the git key into the agent, once per boot
+github-app-login                # authorise the GitHub App, once (docs/GITHUB-APP.md)
 
 codespace up <url|path|name>    # create/start a codespace and its editor
   [--config repo|template|plain|auto|<path>]   # which devcontainer.json; also on new, rebuild

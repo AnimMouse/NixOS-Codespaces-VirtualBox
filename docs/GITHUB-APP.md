@@ -161,7 +161,12 @@ Only the client ID and client secret come out of this; both go to
 `/persist/github-app/`, never into the repo — the same rule as the git identity
 (CLAUDE.md §6).
 
-### 4.2 One-time authorisation — `github-app-login` on the VM
+### 4.2 One-time authorisation — `github-app-login` on the VM — built
+
+`scripts/github-app-login`, in `modules/tools.nix`. Besides the steps below it
+refuses a login that returns no refresh token (expiry turned off in the app),
+checks the new token by asking `/user` and `/user/installations`, and passes
+every token to curl on stdin, never on a command line.
 
 A new command next to `ssh-auth` in `modules/tools.nix`:
 
@@ -338,8 +343,8 @@ Each phase ships on its own and leaves the system working.
    forwarded for authentication, so nothing can break that does not already
    work — this proves VM-side signing, "Verified" on GitHub included, before
    anything depends on it.
-2. **App and broker on the VM.** Register the app, `github-app-login`, the
-   broker. Checked by hand with `curl --unix-socket`: a scoped token pushes to
+2. **App and broker on the VM.** Register the app (done), `github-app-login`
+   (built), the broker. Checked by hand with `curl --unix-socket`: a scoped token pushes to
    its repo and is refused by another. Containers still untouched.
 3. **Containers switch — the hole closes here.** In one step: stop forwarding
    the agent and drop keyfile mode, add the credential helper and `gh` shim,

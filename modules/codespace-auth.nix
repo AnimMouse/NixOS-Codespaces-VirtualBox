@@ -79,6 +79,7 @@ in
         "/persist/ssh"
         "/persist/secrets"
         "/persist/tls"
+        "/persist/github-app"
         "/persist/code-server"
         "/persist/home"
         "/persist/codespace"

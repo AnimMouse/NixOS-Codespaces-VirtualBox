@@ -90,6 +90,7 @@ in
         "/persist/secrets"
         "/persist/code-server"
         "/persist/tls"
+        "/persist/github-app"
         "/persist/home"
         "/persist/codespace/secrets"
         "/run/user"

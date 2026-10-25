@@ -1,0 +1,111 @@
+# github-app-login — authorise the GitHub App, once, from the headless VM.
+#
+# docs/GITHUB-APP.md §4.2. The device flow: GitHub hands out a short code, you
+# enter it at github.com/login/device in Firefox on Windows, and this waits for
+# the approval. What it keeps is the refresh token, in
+# @GITHUB_APP_DIR@/refresh_token: the token broker trades it for short-lived
+# access tokens, and each trade returns a new one. The access token from this
+# login is used once, to check it works, and thrown away.
+#
+# Run it again only if the refresh token lapses — unused for 6 months, or
+# revoked — and the broker will say so by name.
+#
+# No token ever goes on a command line, where `ps` would show it: requests
+# carrying one read their curl config from stdin.
+#
+# Built by modules/tools.nix with pkgs.writeShellApplication.
+
+DIR=@GITHUB_APP_DIR@
+
+die() { echo "github-app-login: $*" >&2; exit 1; }
+
+# "Missing" and "unreadable" have different fixes, so they get different
+# messages. The usual unreadable case: files written with sudo, root's.
+for f in client_id client_secret; do
+  if [ -e "$DIR/$f" ] && [ ! -r "$DIR/$f" ]; then
+    die "$DIR/$f exists but $(id -un) cannot read it. Fix with:
+  sudo chown -R $(id -un):$(id -gn) $DIR && chmod 600 $DIR/*"
+  fi
+done
+[ -e "$DIR/client_id" ] || die "no $DIR/client_id — register the app first (docs/GITHUB-APP.md §4.1)"
+client_id=$(tr -d ' \r\n' < "$DIR/client_id")
+[ -n "$client_id" ] || die "$DIR/client_id is empty"
+
+# POST form fields; a client ID is not a secret.
+resp=$(curl -fsS -X POST -H 'Accept: application/json' \
+  --data-urlencode "client_id=$client_id" \
+  https://github.com/login/device/code) \
+  || die "GitHub refused the device code request — is the client ID right?"
+
+device_code=$(jq -r '.device_code // empty' <<<"$resp")
+if [ -z "$device_code" ]; then
+  # device_flow_disabled is the usual one: "Enable Device Flow" unticked.
+  die "no device code: $(jq -r '.error_description // .error // .' <<<"$resp")"
+fi
+user_code=$(jq -r '.user_code' <<<"$resp")
+uri=$(jq -r '.verification_uri' <<<"$resp")
+interval=$(jq -r '.interval // 5' <<<"$resp")
+expires=$(jq -r '.expires_in // 900' <<<"$resp")
+
+echo
+echo "  Open  $uri"
+echo "  Enter $user_code"
+echo
+echo "  Waiting for you to approve it (the code expires in $(( expires / 60 )) minutes)…"
+
+deadline=$(( $(date +%s) + expires ))
+while :; do
+  sleep "$interval"
+  [ "$(date +%s)" -lt "$deadline" ] || die "the code expired before it was approved — run github-app-login again"
+
+  tok=$(curl -fsS -X POST -H 'Accept: application/json' \
+    --data-urlencode "client_id=$client_id" \
+    --data-urlencode "device_code=$device_code" \
+    --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+    https://github.com/login/oauth/access_token) || continue
+
+  case "$(jq -r '.error // empty' <<<"$tok")" in
+    "") break ;;
+    authorization_pending) ;;
+    # GitHub asks for a longer wait between polls; it is an error to ignore it.
+    slow_down) interval=$(( interval + 5 )) ;;
+    access_denied) die "authorisation was declined" ;;
+    expired_token) die "the code expired before it was approved — run github-app-login again" ;;
+    *) die "GitHub said: $(jq -r '.error_description // .error' <<<"$tok")" ;;
+  esac
+done
+
+access=$(jq -r '.access_token // empty' <<<"$tok")
+refresh=$(jq -r '.refresh_token // empty' <<<"$tok")
+[ -n "$access" ] || die "approved, but GitHub returned no access token"
+# No refresh token means "Expire user authorization tokens" is off: the access
+# token then never expires, which is the case this design avoids.
+[ -n "$refresh" ] || die "no refresh token — turn on 'Expire user authorization tokens' in the app settings, then run this again"
+
+# Written by rename, so a reader never sees half a token.
+umask 077
+tmp=$(mktemp "$DIR/.refresh_token.XXXXXX")
+printf '%s\n' "$refresh" > "$tmp"
+mv "$tmp" "$DIR/refresh_token"
+
+refresh_days=$(( $(jq -r '.refresh_token_expires_in // 0' <<<"$tok") / 86400 ))
+
+# Check the token is what it should be: you, and an app installed somewhere.
+api() {
+  curl -fsS --config - "https://api.github.com$1" <<EOF
+header = "Authorization: Bearer $access"
+header = "Accept: application/vnd.github+json"
+header = "X-GitHub-Api-Version: 2022-11-28"
+EOF
+}
+login=$(api /user | jq -r '.login // empty') || true
+installs=$(api /user/installations | jq -r '.total_count // 0') || installs=0
+
+echo
+echo "  Authorised as ${login:-?}."
+echo "  Refresh token saved to $DIR/refresh_token (valid ${refresh_days} days unused)."
+if [ "$installs" = 0 ]; then
+  echo
+  echo "  But the app is not installed on any account yet: open the app's settings"
+  echo "  on GitHub → Install App → your account → All repositories."
+fi

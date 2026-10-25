@@ -15,6 +15,10 @@
 
   allowedSigners = "/persist/git/allowed_signers";
 
+  # The GitHub App's client ID and secret, and the refresh token
+  # github-app-login saves (docs/GITHUB-APP.md). Values only on /persist.
+  githubAppDir = "/persist/github-app";
+
   # This repo's working copy, and the flake output built from it.
   flakeDir = "/persist/dev-vm";
   flakeAttr = "dev";
