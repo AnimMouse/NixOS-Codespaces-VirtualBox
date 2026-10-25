@@ -82,6 +82,11 @@ If you touch any of these, you can now test them properly rather than by proxy.
   (`codespace-proxy@` has since been replaced by nginx.)
 - **`rebuild` stops when nothing changed:** a second `rebuild` printed
   `no changes: already running …` and did not switch.
+- **Shared code-server.** A new codespace links
+  `/mnt/code-server/4.143.1/bin/code-server` from the VM's store, and root in
+  the container gets `Permission denied` writing there; `lsattr` shows the
+  store and the version immutable. The first run found `chattr -R` failing on
+  symlinks, since replaced by `find ! -type l` (CLAUDE.md §8).
 - **`--config template`** comes up with gh, Node, Claude Code and
   `CLAUDE_CONFIG_DIR` on the volume, and commits sign. Its features cost about
   a minute on the first build ever; after that every codespace on the same
@@ -104,13 +109,6 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-- **Shared code-server.** Tested in a container against a real GitHub lookup,
-  download and unpack, with `chattr` stubbed — this container cannot set the
-  immutable bit. On the VM, after `rebuild`: a new codespace prints
-  `code-server <v>, shared` and creates in about 7 s; inside it,
-  `readlink /usr/local/bin/code-server` points into `/mnt/code-server`, and
-  `sudo touch /mnt/code-server/<v>/x` is refused. On the VM, `lsattr -d
-  /persist/codespace/code-server /persist/codespace/code-server/*` shows `i`.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,

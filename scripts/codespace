@@ -348,9 +348,11 @@ ensure_code_server() {
       sudo chown -R root:root "$src" || exit 1
       sudo chattr -i "$CS_STORE" || exit 1
       sudo mv "$src" "$CS_STORE/$v" || exit 1
-      # chattr -R skips symlinks; they cannot be swapped anyway, since the
-      # directories holding them are immutable.
-      sudo chattr -R +i "$CS_STORE/$v" || exit 1
+      # Not `chattr -R`: it fails on every symlink ("Operation not supported
+      # while reading flags") and exits non-zero — node_modules/.bin is full of
+      # them. A symlink cannot carry the bit, and needs none: it lives in a
+      # directory that has it, so it cannot be replaced or removed.
+      sudo find "$CS_STORE/$v" ! -type l -exec chattr +i {} + || exit 1
     ) 9>"$CS_LOCK" || die "could not fetch code-server $v from $url"
     # Checked, not assumed: an editor shared by every codespace must not be
     # left writable, or missing, by a failure above.
@@ -1597,7 +1599,7 @@ prune_code_server() {
     fi
     note "removing code-server $v (no codespace uses it)"
     sudo chattr -i "$CS_STORE"
-    sudo chattr -R -i "$CS_STORE/$v"
+    sudo find "$CS_STORE/$v" ! -type l -exec chattr -i {} +
     sudo rm -rf "${CS_STORE:?}/$v"
     sudo chattr +i "$CS_STORE"
   done
