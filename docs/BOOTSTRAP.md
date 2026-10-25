@@ -1,4 +1,4 @@
-# Bootstrap — Phase 1
+# Bootstrap — installing the VM
 
 Building the VM from the official NixOS 26.05 minimal ISO. At the end of this
 you have a headless machine you can SSH into on `127.0.0.1:2222`, with a
@@ -9,8 +9,11 @@ host keys and the `nixos-rebuild` loop are all confirmed working on real
 hardware. Disks are addressed by SATA slot rather than by `/dev/sdX`, after the
 letters were observed swapping between the ISO and the installed system.
 
-Nothing in Phase 1 installs Docker, the devcontainer CLI, or code-server. That
-is Phase 2.
+The install brings up the whole system — Docker, the devcontainer CLI, the
+`codespace` launcher, nginx and the hub editor included. What it cannot do is
+the personal part: your SSH key, the GitHub App, your dotfiles and the editor
+certificate in Firefox. That is README setup steps 2–5, [at the
+end](#next-the-personal-part).
 
 The flake is fetched straight from GitHub, so the repo must be pushed and public
 before step 4. If you forked it, substitute your own owner/repo in the
@@ -62,8 +65,7 @@ Set Host IP to `127.0.0.1` on every rule — not blank. A blank host IP binds
 | hub | 127.0.0.1 | 8000 | 8000 |
 | ide01 … ide10 | 127.0.0.1 | 8001 … 8010 | 8001 … 8010 |
 
-The 8000-8010 rules are unused until Phase 2. Adding them now saves reopening
-this dialog later.
+8000 is the hub editor on the VM, 8001–8010 one per codespace.
 
 > **Turtle icon** in the status bar after boot means Hyper-V has leaked back and
 > VirtualBox has fallen back to the Windows Hypervisor Platform API. Performance
@@ -238,7 +240,7 @@ this config was verified against. To move to a newer nixpkgs later:
 cd /persist/dev-vm
 nix flake update
 sudo nixos-rebuild switch --flake /persist/dev-vm#dev
-git commit -am "Update flake inputs" && git push
+git commit -am "Update flake inputs" && git push   # pushing needs README step 3
 ```
 
 From the Windows host:
@@ -252,7 +254,7 @@ or `rebuild` from a shell inside the VM. Passwordless sudo is enabled for
 
 ---
 
-## 9. Verify Phase 1
+## 9. Verify the install
 
 ```bash
 # /persist is a separate disk, mounted early
@@ -270,8 +272,8 @@ ls -l /persist/ssh/
 sudo nixos-rebuild switch --flake /persist/dev-vm#dev
 ```
 
-**The actual Phase 1 acceptance test.** Write a marker, then destroy the system
-disk and rebuild:
+**The acceptance test**, worth running once. Write a marker, then destroy the
+system disk and rebuild:
 
 ```bash
 echo "survived $(date -Is)" | sudo tee -a /persist/marker
@@ -284,6 +286,24 @@ echo "survived $(date -Is)" | sudo tee -a /persist/marker
    first — a recreated `system.vdi` must go back on SATA port 0.
 4. `cat /persist/marker` — both lines should be there, and the host should not
    have complained about a changed SSH fingerprint.
+
+---
+
+## Next: the personal part
+
+Continue at [README setup step 2](../README.md#2-set-up-the-rebuild-loop) —
+steps 2 and 7–8 here overlap with it — then:
+
+| README step | What | Why it cannot be in this repo |
+|---|---|---|
+| 2 | Your Windows key in `/persist/ssh/authorized_keys.dev` | survives reinstalls; the password does not |
+| 3 | Signing key, git identity, and the GitHub App: register, install, `github-app-login` | values only on `/persist` |
+| 4 | Your dotfiles in `/persist/dotfiles`, named in `/persist/codespace/config` | optional |
+| 5 | The editor certificate, imported into a Firefox profile | made on first boot, in `/persist/tls` |
+
+Everything on `/persist` — those values, the certificates, the app's
+authorisation — survives a reinstall, so a rebuild of `system.vdi` comes back
+without repeating any of it, except `passwd`.
 
 ---
 

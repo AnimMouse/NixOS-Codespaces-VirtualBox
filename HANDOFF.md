@@ -308,7 +308,7 @@ typo and watching `SC2154` stop it.
 | Key | Default | |
 |---|---|---|
 | `DOTFILES_REPOSITORY` | — | a URL, cloned inside the container; or a git repo on the VM such as `/persist/dotfiles`, snapshotted per codespace and mounted at `/mnt/dotfiles` |
-| `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
+| `DOTFILES_INSTALL_COMMAND` | — | optional: the CLI already runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` at the repo's root |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `GITHUB_AUTH` | `app` | no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository (and any approved in its devcontainer.json), signing on the VM (docs/GITHUB-APP.md). `legacy` forwards the agent instead. Takes effect on `codespace rebuild` |

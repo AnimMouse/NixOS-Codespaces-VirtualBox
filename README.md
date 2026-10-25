@@ -23,7 +23,8 @@ repo, without losing work.** Everything precious lives in exactly two places:
 
 # Setup
 
-Four parts. Part 1 is a one-off; parts 2–4 take about ten minutes.
+Five parts. Part 1 is a one-off; parts 2–5 take about fifteen minutes, plus
+registering a GitHub App in the web UI.
 
 ## 1. Install the VM
 
@@ -61,8 +62,12 @@ sudo nixos-install --flake github:AnimMouse/NixOS-Codespaces-VirtualBox#dev
 Eject the ISO, reboot, then from Windows Terminal:
 
 ```powershell
-ssh -p 2222 dev@localhost      # password: dev
+ssh-keygen -R "[localhost]:2222"   # the ISO had other host keys; once, ever
+ssh -p 2222 dev@localhost          # password: dev
 ```
+
+The first boot also makes the editors' certificates (step 5) and an empty git
+identity template (step 3), both on `/persist`.
 
 ## 2. Set up the rebuild loop
 
@@ -145,10 +150,27 @@ as an authentication key: nothing on the VM logs in with it.
 > either machine. Give the other machine its own authentication key, and this
 > one can be signing-only.
 
-Then register the GitHub App — web UI work, [docs/GITHUB-APP.md
-§4.1](docs/GITHUB-APP.md#41-the-app--by-hand-in-the-github-web-ui) has the
-settings — put its client ID and secret in `/persist/github-app/`, and
-authorise it once:
+Then the GitHub App, in the web UI — a personal app that only you install:
+
+1. <https://github.com/settings/apps/new>, with the settings in
+   [docs/GITHUB-APP.md §4.1](docs/GITHUB-APP.md#41-the-app--by-hand-in-the-github-web-ui):
+   no webhook, **Enable Device Flow** ticked, token expiry left on, and its
+   repository permissions.
+2. On the app's page, **Generate a new client secret**, and note the
+   **Client ID**.
+3. **Install App** → your account → **All repositories**. Without the install
+   the app reaches nothing; scoping happens per token, not here. An
+   organisation's repositories need the app installed there too.
+
+Its two values go on `/persist`, never in a repo — as `dev`, not with sudo,
+since the broker reads them as `dev`:
+
+```bash
+echo Iv23li…your-client-id… > /persist/github-app/client_id
+(umask 077 && cat > /persist/github-app/client_secret)   # paste the secret, Enter, Ctrl-D
+```
+
+Then authorise it once, and check:
 
 ```bash
 sudo systemctl restart git-allowed-signers
@@ -173,11 +195,9 @@ VM, or for a codespace through the VM's signing service:
 ssh-auth        # prompts once per boot; a no-op if already unlocked
 ```
 
-**Why it is not optional.** Containers have no terminal to prompt at, so a
-locked key simply cannot be used there — and ssh reports that as
-`Permission denied (publickey)`, which looks exactly like a key that was never
-registered on GitHub. `codespace up` detects the case and says so explicitly
-rather than leaving you to guess.
+**Why it is not optional.** What signs for a codespace is a service on the
+VM, and it has no terminal to prompt at: with the key locked, a commit in a
+codespace fails with "run ssh-auth on the VM". After every VM reboot, then.
 
 A user ssh-agent runs as a systemd service, so its socket is
 `/run/user/1000/ssh-agent` on every boot, and lingering keeps it alive when you
@@ -185,41 +205,53 @@ log out. That means the socket a container was created with is still the right
 one at your next login. `AddKeysToAgent yes` is set, so the first `ssh` or `git`
 of the boot adds the key after a single prompt.
 
-In agent mode the container is handed the **socket**, plus the *public* key and
-`known_hosts` as individual file mounts. The private key stays on the VM — which
-makes this strictly safer than a passphrase-less key on disk, not just more
-convenient.
+Under `GITHUB_AUTH=legacy` the container is handed that **socket** instead, plus
+the *public* key and `known_hosts` as individual file mounts; there a locked
+key shows as `Permission denied (publickey)`, and `codespace up` says which it
+is.
 
 ## 4. Point the launcher at your dotfiles
 
-Optional. Keep the repo on the VM, beside this one, and point the launcher at
-it in `/persist/codespace/config`:
+Optional. The same dotfiles repo you use in real Codespaces — plain bash, an
+`install.sh` at its root. Keep it on the VM, beside this one (private is fine:
+the VM clones with the app's token):
 
 ```bash
-git clone git@github.com:AnimMouse/dotfiles-codespaces /persist/dotfiles
+git clone https://github.com/you/dotfiles /persist/dotfiles
+```
 
+and point the launcher at it in `/persist/codespace/config`, a file you create:
+
+```bash
 DOTFILES_REPOSITORY=/persist/dotfiles
-DOTFILES_INSTALL_COMMAND=install.sh
 ```
 
 Each new codespace gets its own snapshot of the repo's committed `HEAD` —
-milliseconds, no network, no credential, so a private repo needs nothing
-special. Edit it with `codespace up /persist/dotfiles` and commit; the next new
-codespace has the change, with no push needed. A URL works too, cloned inside
-the container as before. See [Dotfiles](#dotfiles).
+milliseconds, no network, no credential. Edit it with `codespace up
+/persist/dotfiles` and commit; the next new codespace has the change, with no
+push needed. A URL works too, cloned inside the container — public only, since
+nothing there can authenticate the clone.
 
-That is the whole setup. `codespace up <repo>` from here.
-
----
-
-# Daily use
+The CLI runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`,
+`setup.sh` and `setup` it finds at the repo's root; set
+`DOTFILES_INSTALL_COMMAND` only to run something else. See
+[Dotfiles](#dotfiles), and the other settings in that file in HANDOFF.md.
 
 ## 5. Editor access: a certificate in Firefox
 
 Editors have no password. nginx on the VM lets a browser through only if it
 presents a client certificate signed by the VM's own CA, made on first boot into
 `/persist/tls`. Import it once into the Firefox profile you open editors in —
-the kiosk launcher's `codespace` profile, below:
+a profile of its own, `codespace`, which the [kiosk
+launcher](#kiosk-windows) opens. Create it and open it, on Windows:
+
+```powershell
+$ff = "$env:ProgramFiles\Mozilla Firefox\firefox.exe"
+& $ff -CreateProfile codespace
+& $ff --no-remote -P codespace
+```
+
+Fetch the certificate and its passphrase:
 
 ```powershell
 scp -P 2222 "dev@localhost:tls/*" .                              # client.p12, ca.crt
@@ -247,6 +279,16 @@ container and every other program on Windows.
 To rotate (a lost or copied `.p12`): `sudo rm -r /persist/tls && sudo systemctl
 restart editor-tls`, then import the new pair. The old certificate stops
 working at once.
+
+That is the whole setup. `codespace up github.com/you/project` from here: a
+repo with its own `devcontainer.json` uses it, and one without gets
+[`templates/devcontainer.json`](templates/devcontainer.json) — Ubuntu 26.04,
+gh, Node and Claude Code. [Choosing the
+devcontainer.json](#choosing-the-devcontainerjson) has the alternatives.
+
+---
+
+# Daily use
 
 ## Working on a project
 
@@ -293,12 +335,13 @@ first `rm` removed it. Find those with `docker volume ls -f dangling=true`.
 
 **A blank codespace** — for scratch work, trying a language, or anything with no
 repo yet — is `codespace new <name>`. It creates an empty `/persist/repos/<name>`
-and brings a container up on it, using the default image. Deliberately no
+and brings a container up on it, from the template — `--config plain` for the
+bare image. Deliberately no
 `git init`: run one yourself if you want the directory to become a repo. Running
 it again on an existing name just starts that codespace, so it is safe to repeat.
 
-Use `rebuild` after changing a `devcontainer.json`, or after adding an SSH key
-that a running container was created without.
+Use `rebuild` after changing a `devcontainer.json` or `GITHUB_AUTH`: mounts and
+features are fixed when a container is created.
 
 ## What persists inside a codespace
 
@@ -540,12 +583,19 @@ a `system.vdi` wipe.
 ## Kiosk windows
 
 Firefox has no desktop PWA support, and in a normal tab `Ctrl+W` closes the
-editor with it. Run this **on Windows**:
+editor with it. Copy the launcher to Windows once —
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1            # hub
-powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1 8002
-powershell -ExecutionPolicy Bypass -File .\scripts\codespace-kiosk.ps1 project
+scp -P 2222 dev@localhost:/persist/dev-vm/scripts/codespace-kiosk.ps1 .
+```
+
+— and run it **on Windows**. It opens the `codespace` profile from setup
+step 5, holding the certificate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\codespace-kiosk.ps1            # hub
+powershell -ExecutionPolicy Bypass -File .\codespace-kiosk.ps1 8002
+powershell -ExecutionPolicy Bypass -File .\codespace-kiosk.ps1 project
 ```
 
 A name is resolved by asking the VM over SSH. `F11` leaves kiosk mode, `Alt+F4`
