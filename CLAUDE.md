@@ -139,7 +139,7 @@ scripts/
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
 docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials
-docs/EDITOR-MTLS.md            # PLAN ONLY — editor access by client certificate
+docs/EDITOR-MTLS.md            # editor access by client certificate: design and tests
 .github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
 ```
 

@@ -759,10 +759,23 @@ cmd_up() {
   # A container created before editors moved onto sockets has no
   # $CONTAINER_EDITOR mount, and `up` cannot add one: mounts are fixed at
   # create. Its editor listens on a TCP port nginx never forwards to.
+  #
+  # Shell-only rather than an error: the container is up and fine by this
+  # point, and its container layer may hold things worth getting out before a
+  # rebuild discards them — Claude Code's state in $HOME, for one.
   case " $mounts " in
     *" $CONTAINER_EDITOR "*) ;;
-    *) die "$name was created before editors moved behind nginx and has no socket mount.
-  'codespace rebuild $name' recreates it (the checkout and volumes are kept)." ;;
+    *)
+      echo
+      echo "  $name is up — shell only"
+      echo "  Its container predates editors moving behind nginx, so it has no editor socket."
+      echo
+      echo "  codespace shell $name       a terminal inside it"
+      echo "  codespace rebuild $name     brings the editor back. The checkout and volumes are"
+      echo "                              kept; everything else in the container, \$HOME included,"
+      echo "                              is not — take out what you need first."
+      return 0
+      ;;
   esac
 
   # Liveness is asked of the editor itself, over its socket, not inferred from a

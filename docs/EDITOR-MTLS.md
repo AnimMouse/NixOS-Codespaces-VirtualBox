@@ -133,7 +133,8 @@ lost `.p12` alone were all *tested*.
 - The launcher's liveness probe is `curl --unix-socket … /healthz` — still the
   editor itself answering, never a process listing.
 - A container created before this has no `/mnt/editor`, and mounts are fixed at
-  create, so `up` says to `codespace rebuild` it.
+  create, so `up` brings it up shell-only — `codespace shell` works — and says
+  to `codespace rebuild` it for the editor.
 - The hub: `services.code-server.socket = "/run/editors/8000/editor.sock"`,
   `auth = "none"`, and an `ExecStartPre` that makes its directory, since tmpfiles
   is not ordered before it on a switch.
@@ -193,11 +194,12 @@ the password unit, and `codespace rebuild` puts each container back on TCP.
 
 What a container cannot test:
 
-- [ ] The kiosk profile opens every editor with no prompt and no password.
+- [x] The `codespace` profile opens the editors with no password, after the
+      import (confirmed by the user).
 - [ ] A fresh Firefox profile gets `400` on every port.
-- [ ] From the dev-vm codespace: `curl -k https://172.17.0.1:8000/` gets `400`,
-      and `curl http://<another container's ip>:8080/` is refused.
-- [ ] `env | grep -i password` in a codespace shows no editor credential.
+- [x] From the dev-vm codespace: `curl -k https://172.17.0.1:8000/` and
+      `…:8001/` get `400`, and nothing answers on port 8080 on the bridge.
+- [x] No `PASSWORD` in a codespace's environment or any of its processes'.
 - [ ] Firefox accepts the ten-year server certificate under the imported root.
 - [ ] Firefox rejects a certificate the CA signs for `example.com`
       (name constraints honoured, as OpenSSL does).

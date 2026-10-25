@@ -894,7 +894,7 @@ install script runs after every `up`), and stopping a container at all.
 | `400 No required SSL certificate was sent` | This Firefox profile has no client certificate — setup step 5. Expected for any other profile |
 | `403 Forbidden` from nginx, with the certificate imported | The request came from another site or another editor's port (Fetch Metadata). Open the editor's URL directly — typed, bookmarked, or the kiosk launcher |
 | `502 Bad Gateway` | nginx is fine; no editor is on that port's socket. `codespace up <name>` |
-| `<name> was created before editors moved behind nginx` | Its container has no socket mount, and mounts are fixed at create. `codespace rebuild <name>` — checkout and volumes are kept |
+| `up` says `shell only` | The container predates editors moving behind nginx: no socket mount, and mounts are fixed at create. `codespace shell <name>` still works; `codespace rebuild <name>` brings the editor back, keeping the checkout and volumes but nothing else in the container — copy out what you need first |
 | After a VM reboot, `codespace up` says the editor is not answering and `codespace logs` shows nothing newer than the shutdown | The editor is not being restarted. Fixed — `up` probes the editor's socket instead of looking for its process, so a container that was stopped with the VM gets its editor started again |
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |

@@ -100,11 +100,12 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-- **Editor access by client certificate.** Tested in a container against the
-  real code-server, nginx and the generated nginx config; never yet on the VM
-  or in Firefox. Cutover order and the remaining checks are
-  [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md) §4 and §5. Every codespace needs
-  one `codespace rebuild` for its socket mount.
+- **Editor access by client certificate** is cut over and working in Firefox;
+  containers get `400` from every editor port and hold no editor credential.
+  What is left to check — a fresh profile refused, webviews, cross-site pages,
+  name constraints in Firefox — is [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md)
+  §5. Each remaining codespace needs one `codespace rebuild` for its socket
+  mount.
 
 ### Test scaffolding you no longer need
 
