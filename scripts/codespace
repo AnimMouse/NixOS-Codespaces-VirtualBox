@@ -25,11 +25,13 @@ STATE=/persist/codespace
 # `rm <name> --repo` deletes that checkout rather than guessing one from the
 # name. Dot-named so the `$STATE/*/` loops never mistake it for a codespace.
 REMOVED=$STATE/.removed
-# Shared download cache, mounted into every container. Exists because the
-# code-server tarball is ~200 MB and its installer caches into $HOME/.cache,
-# which is container layer and so dies on every rebuild. See cmd_up.
-CACHE=/persist/codespace/cache
-CONTAINER_CACHE=/var/cache/codespace
+# code-server, unpacked once per version on the VM and mounted into every
+# container — see ensure_code_server. Made immutable, because the mount cannot
+# be read-only and a container must not be able to change another's editor.
+CS_STORE=/persist/codespace/code-server
+CS_STAGING=/persist/codespace/.code-server-staging
+CS_LOCK=/persist/codespace/.code-server.lock
+CONTAINER_CS=/mnt/code-server
 # The VM control socket's directory (modules/vm-control.nix), and where it
 # appears in a container. Plumbing, so under /mnt beside /mnt/git-ssh.
 VM_CONTROL_DIR=/run/vm-control
@@ -274,6 +276,92 @@ choose_config() {
   echo "$override"
 }
 
+# The newest code-server already unpacked, or a failure if there is none.
+newest_code_server() {
+  local d v="" 
+  for d in "$CS_STORE"/*/; do
+    [ -x "$d/bin/code-server" ] || continue
+    v=$(printf '%s\n%s\n' "$v" "$(basename "$d")" | sort -V | tail -1)
+  done
+  [ -n "$v" ] && echo "$v"
+}
+
+# Makes sure code-server $1 ("latest" or a version) is unpacked in $CS_STORE,
+# and echoes the version. Progress on stderr.
+#
+# Once per version on the VM, rather than once per container: each container
+# used to unpack its own 676 MB copy — most of its container layer, and 4.5 s
+# of every create — from a tarball cache mounted read-write into all of them.
+# A container has passwordless sudo, and the installer reused a cached tarball
+# without checking it, so one compromised codespace could plant an editor that
+# every later codespace would run.
+#
+# The store is mounted into containers, and the CLI's --mount cannot be
+# read-only. So it is made immutable instead (chattr +i): changing that needs
+# CAP_LINUX_IMMUTABLE, which Docker does not grant, so even root in a container
+# cannot modify, delete or rename these files (tested: chattr is refused in a
+# codespace). The store directory itself is immutable too, so a container
+# cannot plant a version that has not been unpacked yet. A privileged
+# container — docker-in-docker — could lift it, but is root on the VM anyway.
+ensure_code_server() {
+  local want=$1 v arch url
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) die "no code-server release for $(uname -m)" ;;
+  esac
+
+  if [ "$want" = latest ]; then
+    v=$(curl -fsSL --max-time 10 https://api.github.com/repos/coder/code-server/releases/latest 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null || true)
+    v=${v#v}
+    if [ -z "$v" ]; then
+      # Offline, or GitHub's unauthenticated rate limit: a create still works
+      # with what is already here.
+      v=$(newest_code_server) || die "could not ask GitHub for the latest code-server, and none is unpacked yet"
+      note "could not reach GitHub for the latest code-server — using $v, already unpacked"
+    fi
+  else
+    v=$want
+  fi
+
+  if [ ! -x "$CS_STORE/$v/bin/code-server" ]; then
+    url="https://github.com/coder/code-server/releases/download/v$v/code-server-$v-linux-$arch.tar.gz"
+    # A lock, so two creates at once cannot both unpack, and a temporary
+    # directory on the same filesystem, so the version appears by one rename,
+    # never half-written.
+    (
+      flock 9
+      [ -x "$CS_STORE/$v/bin/code-server" ] && exit 0
+      # Whatever happens below, the store ends immutable and the staging area
+      # gone: a failure between lifting and restoring +i must not leave every
+      # codespace's editor writable.
+      trap 'sudo chattr +i "$CS_STORE"; sudo rm -rf "$CS_STAGING"' EXIT
+      # Every step checked by hand: this subshell sits on the left of `||`,
+      # where bash switches set -e off, so a failure would otherwise run on.
+      note "fetching code-server $v — once, for every codespace"
+      local src="$CS_STAGING/code-server-$v-linux-$arch"
+      sudo rm -rf "$CS_STAGING" || exit 1
+      mkdir -p "$CS_STAGING" || exit 1
+      curl -fsSL "$url" | tar -xz -C "$CS_STAGING" || exit 1
+      [ -x "$src/bin/code-server" ] || exit 1
+      sudo chown -R root:root "$src" || exit 1
+      sudo chattr -i "$CS_STORE" || exit 1
+      sudo mv "$src" "$CS_STORE/$v" || exit 1
+      # chattr -R skips symlinks; they cannot be swapped anyway, since the
+      # directories holding them are immutable.
+      sudo chattr -R +i "$CS_STORE/$v" || exit 1
+    ) 9>"$CS_LOCK" || die "could not fetch code-server $v from $url"
+    # Checked, not assumed: an editor shared by every codespace must not be
+    # left writable, or missing, by a failure above.
+    [ -x "$CS_STORE/$v/bin/code-server" ] \
+      || die "code-server $v is not in $CS_STORE after unpacking"
+    lsattr -d "$CS_STORE/$v" 2>/dev/null | cut -d' ' -f1 | grep -q i \
+      || die "$CS_STORE/$v is not immutable — refusing to share it"
+  fi
+  echo "$v"
+}
+
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
 container_any() { docker ps -aq --filter "label=codespace=$1" | head -1; }
 
@@ -511,12 +599,14 @@ cmd_up() {
     args+=(--mount "type=bind,source=$REFS,target=/workspaces/$REFS_NAME")
   fi
 
-  # Shared across every codespace on purpose: one download of the code-server
-  # tarball serves all of them, now and after any rebuild. A bind rather than a
-  # volume so it is browsable and prunable from the VM with plain `rm`, and
-  # because nothing here is state — worst case it re-downloads.
-  mkdir -p "$CACHE"
-  args+=(--mount "type=bind,source=$CACHE,target=$CONTAINER_CACHE")
+  # code-server, shared by every codespace and immutable — see
+  # ensure_code_server. The directory must exist for the mount; versions are
+  # unpacked into it after `up`, only when this container needs one.
+  if [ ! -d "$CS_STORE" ]; then
+    sudo install -d -o root -g root -m 0755 "$CS_STORE"
+    sudo chattr +i "$CS_STORE"
+  fi
+  args+=(--mount "type=bind,source=$CS_STORE,target=$CONTAINER_CS")
 
   # The VM control socket: read-only questions about the VM, and builds in its
   # store, for the codespaces allowed them (vm_control_for). The directory, not
@@ -627,48 +717,44 @@ cmd_up() {
     note "note: this container predates the VM control socket — 'codespace rebuild $name' to add it"
   fi
 
-  # Installed after every `up`, not baked in as a feature: no third-party
-  # feature for code-server resolves on ghcr, and doing it here leaves the
-  # project's devcontainer.json untouched so it stays portable to real
-  # Codespaces. `--method standalone` avoids apt, so this works on any glibc
-  # base image. Recreating the container discards it, hence the check.
+  # code-server comes from the VM, not from a feature: no third-party feature
+  # for it resolves on ghcr, and this leaves the project's devcontainer.json
+  # untouched, so it stays portable to real Codespaces. The release is a
+  # standalone build with its own Node, so it runs on any glibc base image.
   #
-  # XDG_CACHE_HOME redirects the installer's own download cache onto the shared
-  # bind mount. Its fetch() reuses an already-downloaded tarball, but it caches
-  # under $HOME/.cache by default — container layer, so every new codespace
-  # re-fetched the same ~200 MB release. Pointed at /persist it downloads once
-  # per version, ever, and later containers only untar.
-  #
-  # `sudo env VAR=…` rather than `sudo VAR=…` because the bare form depends on
-  # the container's sudoers policy: sudo accepts a command-line assignment only
-  # for variables absent from env_delete, or with `setenv` granted. It does
-  # work under the devcontainers default (checked), but base images are not
-  # ours to assume. Through `env` the assignment is an argument to a command,
-  # so no env policy applies.
-  # CODE_SERVER_VERSION pins it; unset or `latest` leaves the installer to
-  # resolve the newest release itself, which is the default. Pinning also makes
-  # the cache above deterministic — an unpinned install quietly accumulates a
-  # tarball per release.
-  #
-  # The leading `v` is stripped because the installer does not: it strips one
-  # only when resolving `latest` on its own, so an explicit `--version v4.138.0`
-  # builds a URL for code-server-v4.138.0-linux-amd64.tar.gz, which does not
-  # exist. The tag you copy off the releases page has the v.
-  local cs_version cs_arg=""
+  # CODE_SERVER_VERSION pins it; unset or `latest` resolves the newest release.
+  # A leading `v` is fine — the tag you copy off the releases page has one.
+  local cs_version
   cs_version="${CODE_SERVER_VERSION:-latest}"
   cs_version="${cs_version,,}"
+  cs_version="${cs_version#v}"
   case "$cs_version" in
     latest) ;;
     *[!0-9a-z.-]*) die "CODE_SERVER_VERSION='$cs_version' is not a version — use e.g. 4.138.0, or 'latest'" ;;
-    *) cs_arg=" --version ${cs_version#v}" ;;
   esac
 
-  # Only ever installs into a container that has none, so changing the pin
-  # takes effect on `codespace rebuild`, not on the next `up`.
-  note "ensuring code-server is installed ($cs_version)"
-  docker exec -u "$remote_user" "$cid" bash -lc \
-    "command -v code-server >/dev/null || curl -fsSL https://code-server.dev/install.sh | sudo env XDG_CACHE_HOME=$CONTAINER_CACHE sh -s -- --method standalone --prefix /usr/local$cs_arg" \
-    || die "could not install code-server in the container"
+  case " $mounts " in
+    *" $CONTAINER_CS "*)
+      # Linked once, at create: a container keeps its version until
+      # `codespace rebuild`, so a new release or a changed pin never swaps the
+      # editor under a running codespace. The version is recorded so `gc`
+      # knows which unpacked ones are still in use.
+      if ! docker exec "$cid" test -x /usr/local/bin/code-server; then
+        local cs_v
+        cs_v=$(ensure_code_server "$cs_version") || exit 1
+        docker exec -u root "$cid" ln -sfn "$CONTAINER_CS/$cs_v/bin/code-server" /usr/local/bin/code-server \
+          || die "could not link code-server into the container"
+        echo "$cs_v" > "$STATE/$name/code_server"
+        note "code-server $cs_v, shared"
+      fi
+      ;;
+    *)
+      # A container from before the shared store unpacked its own copy at
+      # create; it keeps using that until it is rebuilt.
+      docker exec "$cid" sh -c 'command -v code-server' >/dev/null 2>&1 \
+        || die "$name has no code-server and predates the shared one — 'codespace rebuild $name'"
+      ;;
+  esac
 
   # Real Codespaces injects GITHUB_TOKEN so `gh` works inside the container
   # without a second login. Nothing does that here, so hand the container the
@@ -1437,7 +1523,7 @@ list_sizes() {
       + (if $other > 0 then [["other containers", $other, "not codespaces"]] else [] end)
       ) | .[] | @tsv')
   printf '  %-16s %9s  %s\n' "refs" "$(human "$(du_bytes "$REFS")")" "$REFS"
-  printf '  %-16s %9s  %s\n' "editor cache" "$(human "$(du_bytes "$CACHE")")" "$CACHE"
+  printf '  %-16s %9s  %s\n' "code-server" "$(human "$(du_bytes "$CS_STORE")")" "$CS_STORE, shared by every codespace"
 }
 
 # The Codespaces retention behaviour, on a real last-used clock. Deliberately
@@ -1488,6 +1574,33 @@ cmd_gc() {
     swept=$(( swept + 1 ))
   done
   [ "$swept" -gt 0 ] || note "nothing idle past ${days}d"
+
+  prune_code_server "$dry"
+}
+
+# Drops unpacked code-server versions no codespace uses. "Uses" is what `up`
+# recorded at create, in $STATE/<name>/code_server — a stopped container cannot
+# be asked. The newest is always kept, so the next create needs no download.
+prune_code_server() {
+  local dry=$1 d v newest keep
+  [ -d "$CS_STORE" ] || return 0
+  newest=$(newest_code_server) || return 0
+  keep=$(cat "$STATE"/*/code_server 2>/dev/null || true)
+  for d in "$CS_STORE"/*/; do
+    [ -d "$d" ] || continue
+    v=$(basename "$d")
+    [ "$v" = "$newest" ] && continue
+    printf '%s\n' "$keep" | grep -qxF "$v" && continue
+    if [ "$dry" = 1 ]; then
+      note "would remove code-server $v (no codespace uses it)"
+      continue
+    fi
+    note "removing code-server $v (no codespace uses it)"
+    sudo chattr -i "$CS_STORE"
+    sudo chattr -R -i "$CS_STORE/$v"
+    sudo rm -rf "${CS_STORE:?}/$v"
+    sudo chattr +i "$CS_STORE"
+  done
 }
 
 cmd_logs() {

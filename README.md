@@ -541,7 +541,7 @@ sudo nix run nixpkgs/nixos-26.05#ncdu -- -x /persist     # interactive, nothing 
 container's writable layer, the image layers no other image has, volumes no
 other container mounts, and its checkout — and lists the rest underneath:
 shared volumes such as `dev-vm-nix-store`, shared base layers, unattached
-volumes, build cache, `/persist/refs` and the editor cache. Rows plus footer
+volumes, build cache, `/persist/refs` and the shared code-server. Rows plus footer
 add up to what is on disk, rather than counting a shared thing twice. `?` means
 Docker did not report a figure. It is slow by nature: Docker measures a volume
 by walking every file in it.
@@ -553,7 +553,8 @@ The usual suspects:
 | `/persist/docker` | images, containers, volumes, build cache | partly — the weekly prune skips tagged images, so every rebuild's image stays |
 | `/persist/docker/volumes/dev-vm-nix-store` | the Nix store *inside* this repo's codespace | **never** — not the VM's store |
 | `/persist/docker/volumes/dind-var-lib-docker-*` | each docker-in-docker codespace's own images | only by `codespace rm --volume` |
-| `/persist/codespace/cache` | code-server release tarballs, one per version | never |
+| `/persist/codespace/code-server` | code-server, unpacked once per version and shared by every codespace (~680 MB each) | by `codespace gc` — versions no codespace uses, keeping the newest |
+| `/persist/codespace/cache` | the old per-container tarball cache — nothing uses it any more | delete it: `rm -rf /persist/codespace/cache` |
 | `/persist/repos`, `/persist/refs` | your checkouts | never |
 
 ### Freeing it, safest first
@@ -573,8 +574,8 @@ running or stopped breaks; the next rebuild downloads its base image again.
 Inside the dev-vm codespace, `nix-collect-garbage -d` cleans its store volume —
 often the largest single thing here, and nothing does it for you.
 
-`rm -rf /persist/codespace/cache/*` is safe; versions still in use download
-again on demand.
+Unused code-server versions go with `codespace gc`. They are immutable, so a
+plain `rm` is refused; `gc` lifts that for what it removes.
 
 Avoid `docker volume prune -a`. Docker 29 prunes only anonymous volumes unless
 given `-a`, and with it removes every named volume not attached to a container —

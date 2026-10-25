@@ -104,6 +104,13 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
+- **Shared code-server.** Tested in a container against a real GitHub lookup,
+  download and unpack, with `chattr` stubbed — this container cannot set the
+  immutable bit. On the VM, after `rebuild`: a new codespace prints
+  `code-server <v>, shared` and creates in about 7 s; inside it,
+  `readlink /usr/local/bin/code-server` points into `/mnt/code-server`, and
+  `sudo touch /mnt/code-server/<v>/x` is refused. On the VM, `lsattr -d
+  /persist/codespace/code-server /persist/codespace/code-server/*` shows `i`.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
@@ -226,8 +233,8 @@ typo and watching `SC2154` stop it.
   config                         launcher settings (below)
   .removed/<name>                checkout path a plain `rm` left, for a later `rm --repo`
   secrets                        KEY=value, mode 0600
-  cache/                         shared download cache, bind-mounted in every
-                                 container — the code-server tarball, once
+  code-server/<version>/         code-server, unpacked once and mounted into every
+                                 container at /mnt/code-server. Immutable (chattr +i)
   <name>/                        port, generated devcontainer.json, secrets, last_used
 /persist/code-server/           hub editor extensions and state (a leftover `pw`
                                  is no longer read — delete it)
@@ -253,7 +260,7 @@ typo and watching `SC2154` stop it.
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
-| `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Takes effect on `codespace rebuild` |
+| `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Unpacked once into the shared store; takes effect on `codespace rebuild` |
 | `VM_CONTROL` | the flake's codespace | names that get the VM control socket (below); empty for none. Takes effect on `codespace rebuild` |
 | `TIMEZONE` | the VM's own | zone for every container, e.g. `Asia/Manila`. On `/persist` so it need not be committed — see below |
 
@@ -351,10 +358,10 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
   `postCreateCommand` carries, or auto-update fails with "no write permission
   to npm prefix".
 - **Disk.** `codespace ls --size` first; README "Disk space" has the cleanup
-  order and how to grow `persist.vdi`. Every container layer measured 1.1 GB or
-  more even barely used — possibly each one's own copy of code-server.
-  Unmeasured; if confirmed, running it from the shared cache mount would make
-  one copy serve all.
+  order and how to grow `persist.vdi`. Each container layer used to carry its
+  own 676 MB copy of code-server; it is now shared from
+  `/persist/codespace/code-server`. Each codespace sheds its copy on its next
+  `codespace rebuild`, and `/persist/codespace/cache` can then be deleted.
 - **Host RAM** is not returned by VirtualBox on its own. Save the machine state
   rather than shutting down; README "Host memory" has the balloon and sizing
   options.

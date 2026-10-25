@@ -3,7 +3,7 @@
 let
   codespace = pkgs.writeShellApplication {
     name = "codespace";
-    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused diffutils ];
+    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused diffutils gnutar gzip e2fsprogs util-linux ];
     # The flake's checkout, so the launcher can tell which codespace is the
     # one editing this machine — the default for VM_CONTROL. And the default
     # devcontainer.json, from the store, so the template is versioned with the
@@ -37,6 +37,9 @@ in
       User = "dev";
       ExecStart = "${lib.getExe codespace} gc";
     };
+    # sudo, for removing code-server versions nothing uses: they are immutable,
+    # and only root can lift that. Units get no /run/wrappers on their PATH.
+    path = [ "/run/wrappers" ];
   };
 
   systemd.timers.codespace-gc = {
@@ -60,11 +63,6 @@ in
     # next to your project for reference just works; here only the project is a
     # mount, so this is the equivalent that survives.
     "d /persist/refs      0755 dev users -"
-    # Shared download cache, bind-mounted into every container. The code-server
-    # installer caches into $HOME/.cache, which is container layer, so each new
-    # codespace re-fetched the same ~200 MB tarball. Not state: deleting it
-    # costs one download.
-    "d /persist/codespace/cache 0755 dev users -"
     # Optional: a git identity for containers to push with, when no ssh agent
     # is being forwarded. Holds only that key — never the host keys in
     # /persist/ssh, which are root-owned and useless for git anyway.
