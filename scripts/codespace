@@ -32,6 +32,10 @@ CS_STORE=/persist/codespace/code-server
 CS_STAGING=/persist/codespace/.code-server-staging
 CS_LOCK=/persist/codespace/.code-server.lock
 CONTAINER_CS=/mnt/code-server
+# Credential services on the VM (modules/codespace-auth.nix): commit signing
+# now, scoped GitHub tokens later. One directory for every codespace.
+AUTH_DIR=/run/codespace-auth
+CONTAINER_AUTH=/mnt/github
 # The VM control socket's directory (modules/vm-control.nix), and where it
 # appears in a container. Plumbing, so under /mnt beside /mnt/git-ssh.
 VM_CONTROL_DIR=/run/vm-control
@@ -610,6 +614,14 @@ cmd_up() {
   fi
   args+=(--mount "type=bind,source=$CS_STORE,target=$CONTAINER_CS")
 
+  # The credential services' directory, in every new container whatever
+  # GIT_SIGNING says now, so switching it later needs no rebuild. It grants
+  # nothing a container does not already have: getting commits signed is what
+  # the forwarded agent allows today, and more.
+  if [ -d "$AUTH_DIR" ]; then
+    args+=(--mount "type=bind,source=$AUTH_DIR,target=$CONTAINER_AUTH")
+  fi
+
   # The VM control socket: read-only questions about the VM, and builds in its
   # store, for the codespaces allowed them (vm_control_for). The directory, not
   # the socket, so a restart of the socket unit does not strand the container
@@ -808,7 +820,30 @@ cmd_up() {
   #
   # user.signingkey is the *public* half: `ssh-keygen -Y sign` uses the agent
   # when the private half is unreadable, which is the whole point of agent mode.
-  if [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; then
+  #
+  # GIT_SIGNING=vm signs on the VM instead (modules/codespace-auth.nix): git
+  # runs the mounted client as gpg.ssh.program, and the key and its agent need
+  # not be in the container at all. That is what lets the agent stop being
+  # forwarded later (docs/GITHUB-APP.md). Chosen on every `up`, so switching
+  # needs no rebuild — only a container created with the mount.
+  local signing="" have_auth=0
+  case " $mounts " in *" $CONTAINER_AUTH "*) have_auth=1 ;; esac
+  case "${GIT_SIGNING:-agent}" in
+    vm)
+      if [ "$have_auth" = 1 ]; then
+        signing=vm
+      else
+        note "note: GIT_SIGNING=vm, but this container predates the signing service — 'codespace rebuild $name'"
+      fi
+      ;;
+    agent) ;;
+    *) die "GIT_SIGNING must be agent or vm (got '${GIT_SIGNING}')" ;;
+  esac
+  if [ -z "$signing" ] && { [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; }; then
+    signing=key
+  fi
+
+  if [ -n "$signing" ]; then
     docker exec -u root "$cid" sh -c '
       set -e
       git config --system gpg.format ssh
@@ -816,11 +851,22 @@ cmd_up() {
       git config --system commit.gpgsign true
       git config --system tag.gpgsign true
       [ -r /mnt/git-ssh/allowed_signers ]         && git config --system gpg.ssh.allowedSignersFile /mnt/git-ssh/allowed_signers
-      # With a key available, reach GitHub over SSH even for https remotes, so a
-      # repo cloned over https can still be pushed.
-      git config --system --replace-all url."git@github.com:".insteadOf https://github.com/
+      if [ "$1" = vm ]; then
+        git config --system gpg.ssh.program "$2/git-sign-codespace"
+      else
+        git config --system --unset-all gpg.ssh.program || true
+      fi
       exit 0
-    ' 2>/dev/null || note "note: could not set container git signing config"
+    ' _ "$signing" "$CONTAINER_AUTH" 2>/dev/null || note "note: could not set container git signing config"
+  fi
+
+  # With a key available, reach GitHub over SSH even for https remotes, so a
+  # repo cloned over https can still be pushed. Tied to authentication, not to
+  # signing: VM-side signing needs no key in the container.
+  if [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; then
+    docker exec -u root "$cid" \
+      git config --system --replace-all url."git@github.com:".insteadOf https://github.com/ 2>/dev/null \
+      || note "note: could not set the https→ssh rewrite"
   fi
 
   # Wire the identity in at the container's *system* level, so `git commit`
@@ -994,6 +1040,7 @@ cmd_up() {
   echo "  $name is up"
   echo "  https://localhost:$port/"
   [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
+  [ "$signing" = vm ] && echo "  git: commits signed on the VM (GIT_SIGNING=vm)"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
   [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
   [ -n "$gh_token" ] && echo "  gh:  authenticated with the VM's token"

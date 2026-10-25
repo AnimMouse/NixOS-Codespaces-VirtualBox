@@ -695,6 +695,24 @@ all work with **no passphrase prompt** — the crypto happens back on the VM.
 Signing works because `user.signingkey` is the *public* key, and `ssh-keygen -Y
 sign` will use the agent when the private half is unreadable.
 
+**Signing on the VM instead** — `GIT_SIGNING=vm` in `/persist/codespace/config`:
+
+```bash
+GIT_SIGNING=vm          # agent (default) | vm
+```
+
+Commits and tags are then signed by a service on the VM
+(`modules/codespace-auth.nix`) with the same key, and only the signature comes
+back: git in the container runs `/mnt/github/git-sign-codespace` as its
+`gpg.ssh.program`. The point is what it makes possible next. An ssh-agent
+cannot tell signing from logging in, so a container holding the forwarded agent
+can push to every repository you can; a signature from this service is in
+git's own namespace and cannot be used to log in. Once scoped tokens cover
+pushing ([docs/GITHUB-APP.md](docs/GITHUB-APP.md)), the agent stops being
+forwarded at all. Chosen on every `up`; a container from before the service
+needs one `codespace rebuild` for its `/mnt/github` mount. If the VM's agent is
+locked, the commit fails with "run ssh-auth on the VM".
+
 **`gh` in containers.** On the VM the login lives in `~/.config/gh`, which is on
 `/persist` — so it survives a reboot *and* a `system.vdi` wipe. Containers have
 their own `$HOME` and inherit nothing, so `codespace up` reads `gh auth token`
@@ -850,6 +868,7 @@ modules/
   editor-proxy.nix              nginx with client certificates, and the CA
   codespace.nix                 launcher package + editor proxy unit
   vm-control.nix                read-only control socket for the flake's codespace
+  codespace-auth.nix            commit signing on the VM, for codespaces
   home.nix                      home-manager wiring + git identity units
   tools.nix                     the `rebuild` and `ssh-auth` commands
 home/dev.nix                    VM dotfiles: git, ssh, gh, bash, tmux
@@ -860,6 +879,8 @@ scripts/ssh-auth                unlock the git key into the agent
 scripts/editor-tls              make the CA and certificates, once
 scripts/vm-control              VM side of the control socket
 scripts/vm                      container side: `vm status`, `vm build`, …
+scripts/git-sign-service        VM side of commit signing
+scripts/git-sign-codespace      container side: git's signing program
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 templates/devcontainer.json     the default config for `--config template`
 docs/BOOTSTRAP.md               full install walkthrough

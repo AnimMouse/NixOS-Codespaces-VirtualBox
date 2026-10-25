@@ -42,6 +42,7 @@
           ./modules/editor-proxy.nix
           ./modules/codespace.nix
           ./modules/vm-control.nix
+          ./modules/codespace-auth.nix
           ./modules/home.nix
           ./modules/tools.nix
         ];

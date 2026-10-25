@@ -1,0 +1,43 @@
+#!/bin/sh
+# git-sign-codespace — gpg.ssh.program inside a codespace.
+#
+# git signs by running `<program> -Y sign -n git -f <public key> <buffer>` and
+# reading the signature from <buffer>.sig (checked against git 2.56). This sends
+# the buffer to the VM's signing service at /mnt/github/sign.sock and writes
+# back what it returns, so the private key — and the agent holding it, which
+# could also authenticate — never reach the container. The VM always signs in
+# namespace "git" with its own key; -n and -f here are ignored.
+#
+# Every other mode — verify, find-principals, check-novalidate, which
+# `git log --show-signature` uses — needs no private key and goes straight to
+# the real ssh-keygen.
+#
+# Plain sh plus curl, because it runs in whatever image the codespace uses.
+# The VM copies it into the mounted directory, so a VM rebuild updates it in
+# every container at once.
+
+sock=/mnt/github/sign.sock
+
+if [ "${1:-}" = -Y ] && [ "${2:-}" = sign ]; then
+  # The buffer is the last argument.
+  for buf in "$@"; do :; done
+  if [ ! -S "$sock" ]; then
+    echo "git-sign-codespace: no signing service at $sock" >&2
+    exit 1
+  fi
+  out="$buf.sig.tmp"
+  code=$(curl -sS --unix-socket "$sock" -o "$out" -w '%{http_code}' \
+    --data-binary "@$buf" http://vm/sign) || code=000
+  if [ "$code" = 200 ] && [ -s "$out" ]; then
+    mv "$out" "$buf.sig"
+    exit 0
+  fi
+  # The service explains itself in the body: a locked agent says to run
+  # ssh-auth on the VM, rather than git's own opaque "failed to sign".
+  echo "git-sign-codespace: the VM did not sign (HTTP $code):" >&2
+  [ -s "$out" ] && sed 's/^/  /' "$out" >&2
+  rm -f "$out"
+  exit 1
+fi
+
+exec ssh-keygen "$@"

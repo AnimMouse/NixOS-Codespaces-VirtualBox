@@ -1,11 +1,13 @@
-# Scoped GitHub credentials — plan, not built
+# Scoped GitHub credentials — phase 1 built, the rest planned
 
 Give each codespace a GitHub credential that reaches **only its own
 repository**, the way a real Codespace's `GITHUB_TOKEN` does, using a personal
 GitHub App that mints a scoped token per codespace — and sign its commits on
 the VM, so no key that can authenticate ever reaches a container.
 
-Nothing here is implemented yet. Facts marked *checked* were read from GitHub's
+Phase 1, signing on the VM, is built: `modules/codespace-auth.nix`,
+`scripts/git-sign-service`, `scripts/git-sign-codespace`, and `GIT_SIGNING` in
+the launcher. The rest is not. Facts marked *checked* were read from GitHub's
 documentation, from source, or observed; facts marked **verify** must be
 confirmed before or during the build, and the design bends if they turn out
 false.
@@ -108,23 +110,33 @@ User access tokens (*checked*, GitHub Apps docs):
  │   client_id, client_secret, refresh_token   │      │ gh ───────► shim ─────────────┤│
  │                │                            │      │                               ▼│
  │                ▼                            │ bind │ /mnt/github/token.sock         │
- │ token broker ──────────────► /run/codespace-auth/<name>/ ───►                       │
+ │ token broker ──────────────► /run/codespace-auth/       ───►                       │
  │ ssh-agent ◄── signing service ──►           │ dir  │ /mnt/github/sign.sock          │
  │   (your one key; never leaves the VM)       │      │       ▲                        │
  └─────────────────────────────────────────────┘      │ git commit -S ─► sign client ──┘│
                                                        └───────────────────────────────┘
 ```
 
-Each codespace gets **one directory**, `/run/codespace-auth/<name>/`, holding
-its two sockets, bind-mounted at `/mnt/github`. A directory, not the socket
-files: a bind mount of a file pins its inode, so a restarted service would
-leave every container holding a dead socket — learned with `vm-control` and the
-editor sockets. Plumbing under `/mnt`, per CLAUDE.md §8.
+**One directory for every codespace**, `/run/codespace-auth/`, holding the
+sockets, bind-mounted at `/mnt/github`. A directory, not the socket files: a
+bind mount of a file pins its inode, so a restarted service would leave every
+container holding a dead socket — learned with `vm-control` and the editor
+sockets. Plumbing under `/mnt`, per CLAUDE.md §8.
 
-**The directory is the identity.** A request arriving on `wgcf-connector`'s
-sockets can only ever get what `wgcf-connector` is entitled to; nothing in the
-request can widen it. The same per-codespace identity makes revocation on
-`codespace rm` and a per-codespace signing log possible.
+**The kernel is the identity, not the socket.** The first version of this plan
+gave each codespace its own directory and treated *that* as the identity —
+which needs a socket unit per codespace, the kind nginx had just removed for
+the editors. Instead the service asks the kernel who connected: `SO_PEERCRED`
+gives the connecting process's PID as the VM sees it, and `/proc/<pid>/cgroup`
+names its Docker container (`docker-<id>.scope`). Nothing inside a container
+can forge either. Built that way for signing, where it only labels the log.
+
+**Verify before tokens depend on it (phase 2):**
+- [ ] On the VM, the cgroup of a container's process names its container ID.
+      The signing log should already show `container <id>`, not `pid <n>`.
+- [ ] A PID can be reused between `connect()` and reading its cgroup. For
+      signing that only mislabels a log line; for tokens it must not happen —
+      use `SO_PEERPIDFD` (kernel ≥ 6.5) and re-check the pidfd after reading.
 
 ### 4.1 The app — by hand, in the GitHub web UI
 
@@ -185,8 +197,8 @@ launcher names the `ssh-add` to run for a locked key (CLAUDE.md §8).
   the per-codespace sockets lean towards one process that listens on all of
   them, since a socket unit per codespace would bring back the per-codespace
   units nginx just removed.
-- A codespace with no GitHub remote (`codespace new`) gets a socket that
-  answers "no repository" rather than no socket, so the helper can say why.
+- A codespace with no GitHub remote (`codespace new`) is answered "no
+  repository" rather than refused, so the helper can say why.
 
 ### 4.4 The signing service — your key, used on the VM only
 
@@ -226,8 +238,13 @@ So:
 - Nothing changes on GitHub: same key, same registrations, commits stay
   "Verified".
 
+*Checked* in a container, with the real handler: signing through the agent
+and from an unencrypted key file, a 503 with "run ssh-auth" when neither can
+sign, `git tag -s` (same invocation), a signature asked for directly verifying
+only in namespace `git`, and `git log --show-signature` passing through to
+`ssh-keygen`.
+
 **Verify:**
-- [ ] Tag signing (`git tag -s`) uses the same invocation.
 - [ ] A signature made this way verifies as "Verified" on GitHub, as one made
       with the forwarded agent does today.
 
@@ -286,7 +303,10 @@ Read-only when you cannot write to the source repository, as in Codespaces.
   config, so it overrides the launcher's system-level `gpgsign = true`, and
   signing would silently stop. The script needs a first case: if the system
   config already sets `gpg.ssh.program` — the codespace signing service — leave
-  signing alone. It changes in phase 3, with the launcher.
+  signing alone. **Done** in `dotfiles-codespaces` alongside phase 1, and
+  tested in all four cases: VM signing with and without the agent, the agent
+  alone, and no key at all. It also adds the https→SSH rewrite only while an
+  SSH credential is there to use it.
 - **Private dotfiles repo.** `AnimMouse/dotfiles-codespaces` answers 404 to an
   anonymous API request, so it is private (*checked*). The dotfiles clone runs
   first in the container, before anything here exists (CLAUDE.md §8), and a
@@ -303,7 +323,7 @@ Read-only when you cannot write to the source repository, as in Codespaces.
   now. Only the container side changes.
 - **Signing depends on the VM's agent holding the key**, as it does today with
   the forwarded agent — `ssh-auth` after a reboot, as now.
-- **Revocation**: `codespace rm` removes the codespace's socket directory and
+- **Revocation**: `codespace rm` drops the codespace's entitlement and
   revokes its cached token (`DELETE /applications/{client_id}/token`). Scoped
   tokens expire on their own regardless.
 
@@ -313,8 +333,8 @@ Read-only when you cannot write to the source repository, as in Codespaces.
 
 Each phase ships on its own and leaves the system working.
 
-1. **Signing service.** The VM-side service, the container client, and
-   `gpg.ssh.program` in containers' system config. The agent is still
+1. **Signing service — built.** The VM-side service, the container client, and
+   `gpg.ssh.program` in containers' system config, behind `GIT_SIGNING=vm`. The agent is still
    forwarded for authentication, so nothing can break that does not already
    work — this proves VM-side signing, "Verified" on GitHub included, before
    anything depends on it.
@@ -323,8 +343,8 @@ Each phase ships on its own and leaves the system working.
    its repo and is refused by another. Containers still untouched.
 3. **Containers switch — the hole closes here.** In one step: stop forwarding
    the agent and drop keyfile mode, add the credential helper and `gh` shim,
-   fill `GH_TOKEN` from the broker, flip the remote rewrite to https, and ship
-   the dotfiles change. These cannot be split: taking the agent away before the
+   fill `GH_TOKEN` from the broker, and flip the remote rewrite to https. (The
+   dotfiles change already shipped with phase 1.) These cannot be split: taking the agent away before the
    token path exists leaves a container that cannot push. A launcher setting
    (`GITHUB_AUTH=app|legacy`, default `legacy` until this phase is proven) so
    one `codespace rebuild` moves a codespace either way.

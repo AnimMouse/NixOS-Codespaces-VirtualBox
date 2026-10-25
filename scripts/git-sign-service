@@ -1,0 +1,170 @@
+"""Sign a git commit or tag for a codespace, with the key on the VM.
+
+One request per connection on /run/codespace-auth/sign.sock, started by
+systemd with the socket as stdin and stdout (modules/codespace-auth.nix). The
+client is scripts/git-sign-codespace, which git runs as gpg.ssh.program inside
+the container and which speaks to this with `curl --unix-socket`.
+
+Why this exists: an ssh-agent cannot tell signing from authenticating, so a
+container holding the forwarded agent can push anywhere. This signs on the VM
+instead and returns only the signature. It always uses namespace "git" and
+always the VM's key, whatever the client asks for: an SSHSIG in that namespace
+is a different format from an SSH authentication signature, so a container
+that can get commits signed still cannot log in as you.
+
+Built by modules/codespace-auth.nix with pkgs.writers.writePython3Bin.
+"""
+
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+
+PUBKEY = "@KEY_FILE@.pub"
+PRIVKEY = "@KEY_FILE@"
+MAX_BODY = 10 * 1024 * 1024
+LOCKED = (
+    "the VM's ssh-agent does not hold the git key, so nothing can sign.\n"
+    "On the VM, run: ssh-auth\n"
+)
+
+
+def respond(status, body):
+    reason = {200: "OK", 400: "Bad Request", 404: "Not Found",
+              413: "Too Large", 500: "Error", 503: "Unavailable"}[status]
+    if isinstance(body, str):
+        body = body.encode()
+    out = sys.stdout.buffer
+    out.write(f"HTTP/1.0 {status} {reason}\r\n".encode())
+    out.write(b"Content-Type: text/plain\r\n")
+    out.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    out.write(body)
+    out.flush()
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def caller():
+    """Which container is asking, read from the kernel, not the request.
+
+    SO_PEERCRED gives the connecting process's PID as this side sees it, and
+    its cgroup names the Docker container. Neither can be forged from inside a
+    container. Only used for the log here; phase 2's tokens will depend on it.
+    """
+    try:
+        s = socket.socket(fileno=0)
+        try:
+            cred = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                struct.calcsize("3i"))
+        finally:
+            s.detach()
+        pid = struct.unpack("3i", cred)[0]
+        with open(f"/proc/{pid}/cgroup") as f:
+            m = re.search(r"docker[-/]([0-9a-f]{64})", f.read())
+        return f"container {m.group(1)[:12]}" if m else f"pid {pid}"
+    except OSError:
+        return "unknown caller"
+
+
+def read_request():
+    inp = sys.stdin.buffer
+    line = inp.readline(8192).decode("latin-1").rstrip("\r\n")
+    length = None
+    while True:
+        h = inp.readline(8192)
+        if not h or h in (b"\r\n", b"\n"):
+            break
+        name, _, value = h.decode("latin-1").partition(":")
+        if name.strip().lower() == "content-length":
+            length = int(value.strip())
+    parts = line.split()
+    if len(parts) < 2:
+        return None, None, None, None
+    method, path = parts[0], parts[1]
+    if length is None or length < 0 or length > MAX_BODY:
+        return method, path, length, None
+    return method, path, length, inp.read(length)
+
+
+def agent_holds_key():
+    """True when the agent has our key — compared by type and key, not comment."""
+    try:
+        with open(PUBKEY) as f:
+            want = f.read().split()[:2]
+        r = subprocess.run(["ssh-add", "-L"], capture_output=True, text=True,
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(line.split()[:2] == want for line in r.stdout.splitlines())
+
+
+def unencrypted_private_key():
+    """True when the key file can sign with no passphrase and no agent."""
+    try:
+        r = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", PRIVKEY],
+                           capture_output=True, stdin=subprocess.DEVNULL,
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def subject(buf):
+    """The first line of the commit or tag message, for the log."""
+    _, _, message = buf.partition(b"\n\n")
+    return message.split(b"\n", 1)[0][:80].decode("utf-8", "replace")
+
+
+def main():
+    method, path, length, body = read_request()
+    if method != "POST" or path != "/sign":
+        respond(404, "only POST /sign\n")
+        return
+    if length is None or length < 0:
+        respond(400, "a Content-Length is required\n")
+        return
+    if length > MAX_BODY:
+        respond(413, f"more than {MAX_BODY} bytes to sign\n")
+        return
+    if not body:
+        respond(400, "nothing to sign\n")
+        return
+
+    # Agent first: the usual case, and a passphrase-protected key works only
+    # through it. An unencrypted key file is the fallback, as GIT_SSH_MODE
+    # keyfile allows today.
+    if agent_holds_key():
+        key = PUBKEY
+    elif unencrypted_private_key():
+        key = PRIVKEY
+    else:
+        log(f"refused {caller()}: no key in the agent")
+        respond(503, LOCKED)
+        return
+
+    with tempfile.TemporaryDirectory() as d:
+        buf = os.path.join(d, "buffer")
+        with open(buf, "wb") as f:
+            f.write(body)
+        # -n git always: the namespace is the whole safety argument.
+        r = subprocess.run(
+            ["ssh-keygen", "-Y", "sign", "-n", "git", "-f", key, buf],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        if r.returncode != 0 or not os.path.exists(buf + ".sig"):
+            err = r.stderr.decode("utf-8", "replace").strip()
+            log(f"signing failed for {caller()}: {err}")
+            respond(500, f"ssh-keygen could not sign: {err}\n")
+            return
+        with open(buf + ".sig", "rb") as f:
+            sig = f.read()
+
+    log(f"signed {len(body)} bytes for {caller()}: {subject(body)}")
+    respond(200, sig)
+
+
+main()

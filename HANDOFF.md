@@ -109,6 +109,13 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
+- **VM-side commit signing** (`GIT_SIGNING=vm`, phase 1 of
+  [docs/GITHUB-APP.md](docs/GITHUB-APP.md)). Tested in a container with the real
+  handler behind socat: signing from the agent and from an unencrypted key
+  file, a clear "run ssh-auth" when locked, tags, namespace always `git`, and
+  `git log --show-signature` verifying. On the VM, with `GIT_SIGNING=vm` and a
+  `codespace rebuild`: a commit in the container is "Verified" on GitHub, and
+  `journalctl -u 'codespace-sign@*'` names the container by its ID.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
@@ -254,6 +261,7 @@ typo and watching `SC2154` stop it.
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
+| `GIT_SIGNING` | `agent` | `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
