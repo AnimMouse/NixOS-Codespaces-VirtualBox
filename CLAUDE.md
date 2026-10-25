@@ -9,7 +9,7 @@ modelled on GitHub Codespaces.
 
 A headless NixOS VM running under VirtualBox on a Windows host, exposing
 per-project dev containers with `code-server` editors reachable from Firefox on
-`http://localhost:<port>`.
+`https://localhost:<port>`, behind a client certificate.
 
 The VM is reproducible from this git repo. The dev containers are disposable and
 follow the standard Dev Container specification, so `devcontainer.json` files
@@ -123,8 +123,9 @@ modules/
 ├── persist.nix                # /persist wiring, host key persistence
 ├── tools.nix                  # the `rebuild` and `ssh-auth` commands
 ├── docker.nix                 # Docker + devcontainer CLI
-├── code-server.nix            # hub editor + first-boot password generation
-├── codespace.nix              # launcher package + editor proxy unit
+├── code-server.nix            # hub editor, on a unix socket
+├── codespace.nix              # launcher package + retention timer
+├── editor-proxy.nix           # nginx + client certificates in front of every editor
 ├── vm-control.nix             # read-only control socket for the flake's codespace
 └── home.nix                   # home-manager wiring + git identity units
 home/dev.nix                   # home-manager: VM-layer dotfiles
@@ -132,6 +133,7 @@ scripts/
 ├── codespace                  # launcher: up / new / rebuild / down / rm / list / logs
 ├── rebuild                    # rebuild [--pull] [--force]
 ├── ssh-auth                   # unlock the git key into the agent
+├── editor-tls                 # makes the editor CA and certificates, once
 ├── vm-control                 # VM side of the control socket, one verb per request
 ├── vm                         # container side: plain sh + curl
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
@@ -241,10 +243,10 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **Lockout.** A user with `isNormalUser` but no `hashedPassword`/`hashedPasswordFile`/`authorizedKeys` produces an unloggable machine after reboot | Config must declare auth. Add an assertion if practical |
 | **known_hosts collision.** ISO and installed system share `localhost:2222` with different keys | Persist host keys to `/persist/ssh/`. Then it happens once, ever |
 | **Git credentials.** Codespaces injects a token; nothing does that locally, so `git push` fails inside containers | Mount `/persist/git` (the git key only) into containers from the launcher, and inject `GH_TOKEN` from the VM's `gh`. Not `/persist/ssh`, and not read-only — see below |
-| **Secrets in a public repo.** Password hashes must not be committed | Generate a random code-server password on first boot if `/persist/code-server/pw` is absent; log it to the journal |
+| **Secrets in a public repo.** Password hashes must not be committed | Nothing secret is committed or needed in the config: the editor CA, nginx's certificate and the browser's client certificate are generated on first boot into `/persist/tls` (root only) by `editor-tls.service`; the `.p12` passphrase is logged to the journal once. The editors themselves have no password |
 | **No `devcontainer down`.** The CLI has `up`, `exec`, `build` — no down/stop | The `codespace` wrapper implements `down` via `docker stop` |
 | **Docker image sprawl** | `virtualisation.docker.autoPrune.enable = true`, and Docker's `data-root` set to `/persist/docker` (a bind mount would need its source to exist before systemd mounts it) |
-| **Firefox keybinds.** `Ctrl+Shift+P` opens a Private Window, not the command palette. `Ctrl+W` closes the tab and the editor with it. Firefox has no desktop PWA support | Document `F1` for the palette. Ship a kiosk launcher: `firefox --kiosk -P codespace http://localhost:PORT` |
+| **Firefox keybinds.** `Ctrl+Shift+P` opens a Private Window, not the command palette. `Ctrl+W` closes the tab and the editor with it. Firefox has no desktop PWA support | Document `F1` for the palette. Ship a kiosk launcher: `firefox --kiosk -P codespace https://localhost:PORT` |
 | **Marketplace.** code-server uses Open VSX, not Microsoft's. No Pylance, no official C/C++ extension | Pick Open VSX equivalents in `devcontainer.json` `customizations` |
 | **Turtle icon** in the VirtualBox status bar means Hyper-V leaked back and VirtualBox fell back to the Windows Hypervisor Platform API | Flag loudly to the user; performance drops 2–5× |
 
@@ -255,7 +257,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **`/dev/sdX` is not stable.** Letters follow probe order, not SATA port, and differ between the ISO and the installed system | Address disks by `by-path`. Never by letter, never by `by-id` |
 | **`disko --mode destroy,format,mount` is unconditional** — one target covering both disks erases `/persist` on every reinstall | Two `diskoConfigurations`: `#dev` (system only) and `#first-install` (both) |
 | **Skipping disko still "works".** `nixos-install` runs to completion on an unmounted `/mnt` and dies on the bootloader with blank fields in the error | Pre-flight `findmnt /mnt` in BOOTSTRAP; troubleshooting entry for the exact message |
-| **`devcontainer up` has no `--publish`** and `appPort` only exists in the project's own config | `codespace-proxy@<name>` systemd unit running `socat` to the container's bridge address, re-resolved at start |
+| **`devcontainer up` has no `--publish`** and `appPort` only exists in the project's own config | The editor listens on a unix socket in `/run/editors/<port>/`, bind-mounted into the container at `/mnt/editor`; one static nginx config picks the directory by `$server_port`. No per-codespace proxy unit, so nothing to start, restart or rate-limit |
 | **No third-party code-server feature resolves on ghcr** (`devcontainers-extra`, `-contrib`, `-community`, `itsmechlark` all return no manifest) | Install it after every `up` with the official script, `--method standalone`. Only `devcontainers/*` features are dependable |
 | **`code-server` with no path argument** opens no folder: empty tree, terminals in `$HOME` | Pass `remoteWorkspaceFolder` from `devcontainer up`'s stdout JSON |
 | **The CLI refuses to guess a `devcontainer.json`** and most repos have none | Generate one into `/persist/codespace/<name>/` and pass `--override-config`. Never write into the checkout |
@@ -272,7 +274,12 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **Docker's named-volume namespace is flat and global to the daemon.** Two `devcontainer.json` files naming the same `source=` get the *same* volume, mounted into both containers at once, with no coordination and no warning. Copying a config into a second repo is all it takes | `${devcontainerId}` in the volume name for anything holding real state — it is unique per dev container on a host and stable across rebuilds, so persistence survives but collision cannot happen. A fixed name only where sharing is the intent, as with the Nix store, and then said so in a comment |
 | **Only `/workspaces/<name>` is a mount.** A sudo-created sibling under `/workspaces`, or anything in `$HOME`, lives in the container layer and dies with it — while looking exactly like the real workspace | `/workspaces` stays root-owned so a plain clone there fails rather than silently landing in the container. `rebuild` and `rm` list non-mount entries under `/workspaces` before discarding the container |
 | **`git config --global` cannot work on this VM** — home-manager owns `~/.config/git/config` as a symlink into the read-only store, so it fails with `could not lock config file`. git's own "please tell me who you are" advises exactly that command | Seed `/persist/git/identity` on first boot with comments only — no placeholder values, so an unedited VM has no identity rather than a fake one — and put the `git config -f` commands that do work in those comments |
-| **A proxy unit that fails a few times hits systemd's default start rate limit** (5 in 10s) and then refuses `systemctl restart` until `reset-failed` — presenting as "the editor did not answer" with a perfectly healthy editor | `StartLimitIntervalSec = 0` on the template unit; `reset-failed` before `restart` in the launcher, and check the exit status. On timeout, probe the container directly so the message names the guilty half |
+| **A shared editor password is no boundary.** Every container's code-server ran with the hub's password in its environment, and every container could reach the hub on `172.17.0.1:8000` — a shell on the VM with sudo | nginx requires a client certificate from the VM's own CA (`modules/editor-proxy.nix`); every editor listens on a unix socket, so nginx is the only way in, and runs `--auth none` |
+| **A client certificate rides on a hostile page's requests too.** With no password left, code-server's Origin check is the only guard, and it covers websockets only: its `/proxy/<port>/` route passed a cross-site POST straight to an app in the container. Tested. socat cannot see HTTP to stop it | nginx refuses any request whose `Sec-Fetch-Site` is not `same-origin`, `none` or absent. `same-site` too: ports do not separate sites, so another editor's page is same-site |
+| **code-server takes its Origin-check host from `Forwarded`, then `X-Forwarded-Host`, then `Host`.** nginx's recommended proxy headers set `X-Forwarded-Host` without the port, refusing every websocket; passing a client's own value through would let it steer the check | No `recommendedProxySettings`. `Host $host:$server_port` (not `$http_host`, which the build-time gixy lint rejects), and both forwarding headers cleared |
+| **Linux clears the setgid bit on any `chmod` by a user outside the directory's group.** The launcher's `mkdir` + `chmod 2750` under the setgid-nginx `/run/editors` silently dropped it, so the socket got the container user's group and nginx could not connect | `sudo install -d -o dev -g nginx -m 2750` — exact, and repairs an existing directory in place without replacing the inode a running container has mounted |
+| **`/run` is a tmpfs, and docker will not start a container whose bind-mount source is missing.** After a VM reboot `/run/editors/<port>` is gone | The launcher recreates it on every `up`, before `devcontainer up` starts the container. The hub's is recreated by its unit's `ExecStartPre` too, since tmpfiles is not ordered before it on a switch |
+| **`code-server` run from inside a code-server terminal does not start a server.** `VSCODE_IPC_HOOK_CLI` makes it hand its arguments to the running editor and exit, silently | Test with `env -u VSCODE_IPC_HOOK_CLI /usr/local/bin/code-server …`. The `code-server` on a terminal's PATH is the remote-CLI shim, not the server |
 | **A passphrase-protected key cannot be used where nothing can prompt** — and ssh reports it as `Permission denied (publickey)`, identical to an unregistered key | A user ssh-agent (`services.ssh-agent` + `users.users.dev.linger`) at the stable `/run/user/1000/ssh-agent`; the launcher forwards the socket, never the key. It detects a locked key with `ssh-keygen -y -P ""` and names the `ssh-add` to run rather than letting git fail opaquely |
 | **sshd reads authorized_keys files as the user**, not as root (`temporarily_use_uid` in OpenSSH's `auth2-pubkey.c`). A key file in a root-only `0700` directory is unreadable to it, so key login fails with the same `Permission denied (publickey,…)` as a wrong key | `/persist/ssh` is `0711 root`: `dev` can traverse to `authorized_keys.dev` without listing the host keys beside it, which stay `0600 root`. StrictModes is satisfied — every path component is root-owned and not group- or world-writable |
 | **The VM kernel has no legacy iptables tables** (6.18, `CONFIG_NETFILTER_XTABLES_LEGACY` unset), while the `docker-in-docker` feature switches to `iptables-legacy` on every Debian/Ubuntu except `resolute`. A container borrows the kernel, so the inner `dockerd` dies on its first chain, the init script gives up after five tries, and `up` still reports success | The launcher (`fix_dind_iptables`) points `iptables`/`ip6tables` at the `-nft` binaries (same syntax, nftables backend) and restarts `dockerd` through the feature's own `docker-init.sh`, after waiting out the entrypoint's retry loop by the container's start time. Success is `docker info` answering, never a process listing. Launcher, not `postCreateCommand`: real Codespaces still has the legacy tables |

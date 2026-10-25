@@ -39,6 +39,7 @@
           ./modules/persist.nix
           ./modules/docker.nix
           ./modules/code-server.nix
+          ./modules/editor-proxy.nix
           ./modules/codespace.nix
           ./modules/vm-control.nix
           ./modules/home.nix

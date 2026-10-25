@@ -1,13 +1,15 @@
-# Editor access by client certificate — plan, not built
+# Editor access by client certificate
 
-Replace the shared editor password with a **client certificate in Firefox**,
-checked by the proxy that already sits in front of every editor, and take the
-editors off the network entirely so that the proxy is the only way in.
+Every editor — the hub and each codespace's — is reached only through nginx on
+the VM, which requires a **client certificate in Firefox** signed by the VM's
+own CA. The editors listen on unix sockets, not ports, so nginx is the only way
+in, and they run with no password at all.
 
-Nothing here is implemented yet. Facts marked *checked* were read from source,
-`--help` output or the nixpkgs option tree, or observed; facts marked **verify**
-must be confirmed before or during the build, and the design bends if they turn
-out false.
+Built in `modules/editor-proxy.nix`, `modules/code-server.nix`,
+`scripts/editor-tls` and the launcher. Facts marked *tested* were exercised in
+a container against the real code-server 4.143.1, nginx 1.30 and the exact
+nginx config NixOS generates; facts marked **verify** need Firefox or the VM
+and are listed in §5.
 
 ---
 
@@ -16,241 +18,191 @@ out false.
 An editor is a shell. The hub editor is a shell on the VM as `dev`, who has
 passwordless sudo — so whoever reaches the hub editor is root on the VM.
 
-Today one password guards all of them, and it does not hold:
+Before this, one password guarded all of them, and it did not hold:
 
-| Problem | Observed |
+| Problem | How it was found |
 |---|---|
-| **Every container knows the hub password.** The launcher starts each container's code-server with `-e PASSWORD=$(editor_password)` — the same `/persist/code-server/pw` the hub uses — so it is in that process's environment, readable by anything running as the remote user | *checked* (`scripts/codespace`, `cmd_up`) |
-| **Every container can reach the hub.** The firewall opens 8000–8010 on all interfaces, `docker0` included, so `172.17.0.1:8000` answers from inside a codespace | *checked* — `curl` from the dev-vm codespace got `302` |
-| **Every container can reach every other editor**, both through the VM's ports and directly at the other container's bridge address on 8080 | follows from the above and the default bridge network |
+| **Every container knew the hub password.** The launcher started each container's code-server with `-e PASSWORD=…` — the same `/persist/code-server/pw` the hub used — so it sat in that process's environment | read in `scripts/codespace` |
+| **Every container could reach the hub.** The firewall opens 8000–8010 on all interfaces, `docker0` included | `curl` from the dev-vm codespace to `172.17.0.1:8000` got `302` |
+| **Every container could reach every other editor**, through the VM's ports and directly on the bridge at port 8080 | follows from the above |
 
-Taken together: a dependency's install script, a malicious extension or an
-agent in *any* codespace can log in to the hub editor and become root on the
-VM. The read-only design of `modules/vm-control.nix` means nothing until this
-is closed.
-
-The password is also a chore — copied per browser profile, and the only
-credential in this design that a human has to transport by hand on every
-reinstall.
-
-### Why not just give each codespace its own password
-
-It fixes the first row, and a firewall rule restricting 8000–8010 to the NAT
-interface fixes the second. It does not fix the third (container to container
-on the bridge), and it leaves a string to copy for every codespace instead of
-one. The design below fixes all three with one mechanism.
-
-### Why not an SSH tunnel instead of the NAT forward
-
-The tunnel's local end is still a port on Windows that any local process can
-connect to. It moves the problem, it does not authenticate the browser.
+So a dependency's install script, a malicious extension or an agent in *any*
+codespace could log in to the hub and become root on the VM.
 
 ---
 
 ## 2. Design
 
 ```
-Firefox (codespace profile, holds client cert)
-   │  https://localhost:800N      ← NAT forward, 127.0.0.1 on Windows (§3, unchanged)
+Firefox (profile holding the client certificate)
+   │  https://localhost:800N        ← NAT forward, 127.0.0.1 on Windows (§3, unchanged)
    ▼
-VM :800N  socat OPENSSL-LISTEN  verify=1  cafile=client-CA
-   │                            ← no cert, no connection: the TLS handshake fails
+VM :800N  nginx  ssl_verify_client on, cafile = the VM's CA
+   │              Sec-Fetch-Site must be same-origin, none, or absent
    ▼
-UNIX-CONNECT /run/codespace/<name>/editor.sock
-   │                            ← bind-mounted directory, owned by dev
+unix:/run/editors/800N/editor.sock  ← picked by $server_port; dir setgid nginx
+   │                                  (bind-mounted into the container)
    ▼
-container: code-server --socket /mnt/editor/editor.sock --auth none
+code-server --socket /mnt/editor/editor.sock --auth none
 ```
 
-Two changes do the work:
+Nothing in CLAUDE.md §3 moves: still NAT, still `127.0.0.1` forwards, still
+distinct ports, still `localhost`.
 
-1. **The proxy terminates TLS and requires a client certificate.** It already
-   exists (`codespace-proxy@`), it already runs socat, and socat can do this
-   with options alone. *checked*: socat 1.8.1.3 from nixos-26.05 has
-   `OPENSSL-LISTEN`, `cafile`, `verify`, `openssl-min-proto-version` and
-   `UNIX-CONNECT`.
-2. **The editor listens on a unix socket, not a TCP port.** code-server has
-   `--socket`; *checked* for the hub too: nixpkgs 26.05's `services.code-server`
-   has `socket` and `socketMode` options. A socket in a directory mounted from
-   the VM is reachable from the VM and from inside that one container, and from
-   nowhere on any network. So the editor can run with `--auth none`: the only
-   path to it is the proxy, and the proxy has already checked the certificate.
+### 2.1 Why nginx, not socat
 
-Nothing in §3 moves: still NAT, still `127.0.0.1` forwards, still distinct
-ports, still `localhost` — which stays a secure context over https as it was
-over http.
+The first version of this plan kept the existing socat proxy and added
+`verify=1`. Testing found the hole that sinks it: Firefox presents the client
+certificate on **any** request to `localhost:800N`, including one a hostile
+page makes from another site. With `--auth none` there is no cookie left to
+stop it, and code-server's own Origin check covers websockets only — its
+`/proxy/<port>/` route passed a cross-site POST straight to an app running in
+the container (*tested*). The old password cookie was `SameSite=lax`, so this
+would have been a regression.
 
-### 2.1 Certificates — `/persist/tls`, made on first boot
+Closing it needs a proxy that reads HTTP. nginx rejects by Fetch Metadata,
+which Firefox sets on every request: only `same-origin`, `none` (typed URL,
+bookmark, the kiosk launcher) and absent (non-browser clients, which still need
+the certificate) pass. `same-site` is refused as well — sites ignore ports, so
+another editor's page is same-site.
 
-A oneshot unit, `editor-tls.service`, in the shape of `code-server-password`:
-if a file is absent it is generated, and nothing is ever overwritten.
+Side benefit: the config is static. The per-codespace `codespace-proxy@` units,
+their address re-resolution, their start-rate-limit handling and `reset-failed`
+are gone.
 
-| File | What | Validity |
-|---|---|---|
-| `ca.key`, `ca.crt` | The VM's own CA. Signs the server cert and client certs | 10 years |
-| `server.key`, `server.crt` | One cert for every editor port — certificates are not per-port. SAN `DNS:localhost`, `IP:127.0.0.1` | 2 years, regenerated when within 30 days of expiry |
-| `client.p12` | Your browser's identity: key + cert + CA chain, for one-time import | 2 years |
+### 2.2 Certificates — `/persist/tls`, made on first boot
 
-ECDSA P-256 throughout; OpenSSL, socat and Firefox all handle it.
+`editor-tls.service`, a oneshot ordered before nginx. Nothing that exists is
+overwritten; a certificate the current CA did not sign is remade.
 
-**The CA is name-constrained** to `DNS:localhost` and `IP:127.0.0.1/32`.
-Importing a CA into Firefox normally lets it vouch for *any* website; with
-`nameConstraints` (critical) a leaked `ca.key` can mint certificates for
-`localhost` and nothing else. **verify**: Firefox enforces name constraints on
-a user-imported root — NSS does, but confirm with a deliberately out-of-scope
-cert that it is rejected.
+| File | What |
+|---|---|
+| `ca.key`, `ca.crt` | The VM's CA. **Name-constrained** (critical) to `DNS:localhost` and `IP:127.0.0.1`, so Firefox's trust in it cannot extend to any other site even if `ca.key` leaked. OpenSSL rejects an out-of-scope cert with "permitted subtree violation" (*tested*) |
+| `server.key`, `server.crt` | One certificate for every editor port. SAN `localhost`, `127.0.0.1` |
+| `client.key`, `client.crt`, `client.p12`, `client.pass` | Your browser's identity, packaged for import, and the passphrase Firefox requires |
 
-`/persist/tls` is `0700 root`. Like `/persist/ssh`, it is never mounted into a
-container, and it joins `InaccessiblePaths` in `modules/vm-control.nix`.
+ECDSA P-256; the `.p12` is PBES2/AES-256. **Ten years for all three**, where
+the plan said two with automatic server renewal: browsers' leaf-lifetime limits
+apply to public CAs, not a privately imported root (**verify** in Firefox), and
+every renewal is a manual re-import. Rotation is the revocation story anyway.
 
-The `.p12` needs a passphrase for import. Generated and logged once to the
-journal, exactly as the editor password is today — the one string you still
-copy, once per reinstall-of-Windows rather than once per editor.
+`/persist/tls` is `0750 root:nginx`; nginx can read `ca.crt` and the server
+pair, nothing else. On first creation a `dev`-readable copy of `client.p12`
+and `ca.crt` goes to `~/tls` for `scp`, and the passphrase is logged once. Like
+`/persist/ssh`, the directory is never mounted into a container, and
+`vm-control` cannot see it or `editor-tls`'s journal.
 
-### 2.2 The proxy — `codespace-proxy@`
+Idempotent, rotation (delete the CA, everything is reissued and verifies) and a
+lost `.p12` alone were all *tested*.
 
-```
-socat OPENSSL-LISTEN:$port,fork,reuseaddr,cert=…/server.pem,cafile=…/ca.crt,verify=1,openssl-min-proto-version=TLS1.2 \
-      UNIX-CONNECT:/run/codespace/$name/editor.sock
-```
+### 2.3 nginx
 
-- It no longer resolves the container's bridge address. That lookup, and its
-  failure mode when the container is recreated, go away.
-- `verify=1` with `cafile` = the VM's CA: a client without a certificate signed
-  by it fails the handshake. **verify**: socat sends the CA list in its
-  CertificateRequest, so Firefox offers the right certificate unprompted.
-- Byte-level, so websockets pass through untouched.
+- `ssl_verify_client on` against `ca.crt`. No certificate, or one from another
+  CA: `400` (*tested*).
+- The Fetch Metadata rule above, as a `map` and one `if` (*tested*: same-site
+  and cross-site `403`, a cross-site POST to `/proxy/` never reaches the app).
+- `proxy_pass http://unix:/run/editors/$server_port/editor.sock:` — the socket
+  by port, so a new codespace needs no nginx change (*tested*).
+- Websockets proxied, HTTP/1.1 only (*tested*, `101`).
+- **Host and forwarding headers.** code-server's websocket Origin check takes
+  the host from `Forwarded`, then `X-Forwarded-Host`, then `Host` (read in its
+  `http.js`). So no `recommendedProxySettings` — its `X-Forwarded-Host` has no
+  port and would refuse every websocket — and both forwarding headers are
+  cleared so a client cannot steer the check (*tested*). `Host` is
+  `$host:$server_port`: the build-time gixy lint rejects `$http_host`, and the
+  port matches because §3 forwards each port to the same number.
+- `client_max_body_size 0` — nginx's 1 MB default would break file uploads
+  (*tested* with 2 MB).
 
-### 2.3 The editor — inside each container
+### 2.4 The editors
 
-- `/run/codespace/<name>/` on the VM (tmpfiles `d /run/codespace 0755 dev users`,
-  the launcher creates the per-codespace directory), mounted at `/mnt/editor`.
-  The directory, not the socket file, for the reason given in
-  `modules/vm-control.nix`: a file bind mount pins the inode, and code-server
-  recreates its socket on every start. Under `/mnt` beside `/mnt/git-ssh` and
-  `/mnt/vm`, where §8 says plumbing goes.
-- `code-server --socket /mnt/editor/editor.sock --socket-mode 600 --auth none`,
-  started as the remote user (uid 1000, as `dev` on the VM, so the proxy and the
-  launcher can both reach it).
-- The launcher's "is the editor up" probe becomes
-  `curl --unix-socket /run/codespace/<name>/editor.sock http://x/healthz` —
-  still asking the thing itself (§8, `pgrep`), just over a different transport.
-- `PASSWORD` is no longer passed. Nothing in a container holds an editor
-  credential of any kind.
-
-### 2.4 The hub editor
-
-`services.code-server.socket = "/run/code-server/hub.sock"` and an instance of
-the same TLS proxy on 8000. The hub then has no TCP listener at all, and the
-firewall can close 8000–8010 on everything but the NAT interface for good
-measure — defence in depth, since the handshake already refuses.
-
-### 2.5 Firefox — once per profile
-
-Into the `codespace` profile that `codespace-kiosk.ps1` already uses:
-
-1. Settings → Privacy & Security → Certificates → View Certificates
-2. *Your Certificates* → Import → `client.p12`, with the passphrase
-3. *Authorities* → Import → `ca.crt`, trust for websites
-4. `about:config`: `security.default_personal_cert` = `Select Automatically`,
-   so no certificate chooser on each connection
-
-`/persist/tls` is root-only, so the unit also leaves a `dev`-readable copy of
-exactly these two files in `/persist/home/dev/tls/`, and from Windows:
-`scp -P 2222 "dev@localhost:tls/*" .` — then delete that copy on the VM.
-
-**verify**: Firefox enterprise policies (`policies.json`) document installing a
-CA but not a client certificate, so step 2 stays manual. Step 3 could be a
-policy; not worth the asymmetry.
-
-The kiosk launcher switches to `https://`. Any other Firefox profile used for
-editors needs the same import — the cost of doing this per profile is the
-point: a profile without the certificate cannot get in.
+- `/run/editors` is `2750 dev:nginx`. A directory made inside it, and a socket
+  made inside that, inherit the nginx group, so sockets are `0660` and nginx
+  reaches them through the group alone (*tested* with nginx's workers running
+  as a user whose only access was the group).
+- The launcher makes `/run/editors/<port>` with `sudo install -d -m 2750` on
+  every `up`. Not `mkdir` + `chmod`: Linux clears the setgid bit on a `chmod`
+  by a user outside the group, which produced a socket nginx could not open
+  (*found in testing*). Every `up`, because `/run` is a tmpfs and docker will not
+  start a container whose bind-mount source is missing.
+- Mounted at `/mnt/editor`, beside `/mnt/git-ssh` and `/mnt/vm`. The directory,
+  not the socket: code-server replaces its socket on every start (*tested*: it
+  also takes over a stale one, and removes its own on exit).
+- `code-server --socket /mnt/editor/editor.sock --socket-mode 660 --auth none`.
+  No `PASSWORD`; nothing in a container holds a credential for any editor.
+- The launcher's liveness probe is `curl --unix-socket … /healthz` — still the
+  editor itself answering, never a process listing.
+- A container created before this has no `/mnt/editor`, and mounts are fixed at
+  create, so `up` says to `codespace rebuild` it.
+- The hub: `services.code-server.socket = "/run/editors/8000/editor.sock"`,
+  `auth = "none"`, and an `ExecStartPre` that makes its directory, since tmpfiles
+  is not ordered before it on a switch.
 
 ---
 
-## 3. Consequences to accept or solve
+## 3. Consequences
 
-- **Revocation is rotation.** socat has no CRL option (*checked*: none in
-  `socat -hhh`). A lost `client.p12` means deleting `/persist/tls`, letting the
-  unit regenerate everything, and re-importing — two files, one profile. For a
-  single user that is acceptable; for anything more it would not be.
-- **The `.p12` on Windows is the credential.** Anyone who copies it and its
-  passphrase can reach the editors — but only from that Windows machine, since
-  the forwards are bound to `127.0.0.1`. Same reach as the password today,
-  without the copies inside every container.
-- **Other local processes on Windows** still reach the port, and now fail the
-  handshake instead of meeting a login page. Strictly better.
-- **DNS rebinding** stops working: a hostile name resolved to `127.0.0.1` gets a
-  server certificate for `localhost`, and Firefox refuses the connection.
-- **Cross-site requests are the real residual risk, and the most important
-  check in this plan.** Firefox presents the client certificate on *any*
-  request to `https://localhost:800N`, including one a hostile web page makes
-  from another origin. With `--auth none` there is no cookie or password left
-  to stop it, so a cross-site WebSocket to the editor is stopped by exactly one
-  thing: code-server's Origin check on websocket upgrades. **verify**, by
-  attempting it from a page on another origin, that the upgrade is refused —
-  and that it still is behind the proxy, where code-server sees plain HTTP on
-  its socket while the browser spoke https (if the check rejects legitimate
-  traffic there, `--trusted-origins` exactly `localhost:800N`, never a
-  wildcard). If code-server does not check, this design needs an Origin check
-  of its own in the proxy, which socat cannot do — stop and rethink.
-  Using the kiosk profile *only* for editors, as it already is, narrows this:
-  a hostile page has to be open in that profile to try.
-- **The first visit after the switch** hits the old `http://` URL, now speaking
-  TLS. Firefox shows a protocol error rather than redirecting. Acceptable; the
-  launcher prints the new URL.
-- **Real Codespaces is unaffected.** Nothing here touches `devcontainer.json`;
-  the socket, the mount and `--auth none` are all supplied by the launcher.
+- **Revocation is rotation.** `sudo rm -r /persist/tls && sudo systemctl
+  restart editor-tls`, then re-import. For one person, fine.
+- **The `.p12` on Windows is the credential.** It reaches the editors only from
+  that machine, since the forwards are bound to `127.0.0.1`.
+- **Other local processes on Windows**, and every container, get `400` instead
+  of a login page.
+- **DNS rebinding** fails: a hostile name resolved to `127.0.0.1` gets a
+  certificate for `localhost` and Firefox refuses it.
+- **Links into an editor from elsewhere are refused** (`403`) — another site,
+  or another editor's port. Open editors by URL, bookmark or the kiosk
+  launcher.
+- **code-server's `/proxy/<port>/` previews are same-origin with the editor.**
+  A web app you preview that way runs its scripts on the editor's origin and
+  could drive it. That was equally true with the password, is code-server's
+  design, and the Fetch Metadata rule cannot see it. Preview only what you
+  would run in the editor's terminal anyway.
+- **Real Codespaces is unaffected.** Nothing touches `devcontainer.json`.
 
 ---
 
-## 4. Phases
+## 4. Cutover
 
-Each phase leaves a working system, and the password keeps working until the
-last one.
+Built as one change rather than the five phases first planned: with nginx the
+proxy, the sockets and `--auth none` depend on each other, and the
+intermediate states would each have needed code thrown away a phase later.
 
-1. **Certificates.** `editor-tls.service` and `/persist/tls`. No behaviour
-   change. Import into Firefox.
-2. **TLS at the proxy, TCP behind it.** `codespace-proxy@` switches to
-   `OPENSSL-LISTEN … verify=1`, still connecting to `$ip:8080`, password still
-   on. Proves the Firefox side in isolation: `https://` with the certificate
-   works, without it the handshake fails, and the editor still asks for its
-   password.
-3. **Editors on sockets.** Launcher mounts `/mnt/editor`, starts code-server
-   with `--socket … --auth none`, proxy switches to `UNIX-CONNECT`. Per
-   codespace, on `codespace rebuild` — an old container keeps TCP and the
-   password until rebuilt, and the launcher reads which one it has, as it does
-   for the agent socket.
-4. **Hub on a socket.** `services.code-server.socket`, its own proxy instance
-   on 8000. This is the step that closes root-via-hub.
-5. **Retire the password.** Drop `PASSWORD` from the launcher,
-   `code-server-password.service`, `PW_FILE`, the `password:` line in `up`'s
-   output; tighten the firewall to the NAT interface.
+0. Over SSH, not in an editor — the editors go away in step 1:
+   `sudo systemctl stop 'codespace-proxy@*'`. The switch should stop them as
+   units that no longer exist, but a socat left holding 8001 would stop nginx
+   binding at all, taking every editor down with it.
+1. `rebuild --pull`. `editor-tls` makes `/persist/tls` and logs the passphrase;
+   nginx takes 8000–8010; the hub moves to its socket. **Every codespace editor
+   is unreachable from here** until step 3.
+2. Import the certificate (README, setup step 5).
+3. `codespace rebuild <name>` for each codespace, over SSH. Each needs it once,
+   for the `/mnt/editor` mount.
+
+The old password file `/persist/code-server/pw` is no longer read; delete it.
 
 ### Rollback
 
-Phases 2–4 are each one unit's `ExecStart` and one launcher branch. Reverting
-the commit and `rebuild` restores password auth over http; containers created
-under phase 3 need `codespace rebuild` to get a TCP editor back. Phase 1's files
-on `/persist/tls` are inert without the rest.
+`git revert` and `rebuild`: nginx goes, the hub returns to `0.0.0.0:8000` with
+the password unit, and `codespace rebuild` puts each container back on TCP.
+`/persist/tls` is inert without the rest.
 
 ---
 
-## 5. Checks before calling it done
+## 5. Checks on the VM and in Firefox
 
-From the dev-vm codespace, after phase 5:
+What a container cannot test:
 
-- `curl -k https://172.17.0.1:8000/` fails in the TLS handshake.
-- `curl http://<another container's ip>:8080/` is refused — nothing listens.
-- `env | grep -i password` and `cat /proc/*/environ` show no editor credential.
-- `ls /mnt/editor` shows this codespace's socket only.
-
-From Windows:
-
-- The kiosk profile opens every editor with no prompt and no password.
-- A fresh Firefox profile gets a handshake error on every port.
-- A cert signed by the VM CA for `example.com` is rejected by Firefox (name
-  constraints honoured).
-- A page served from another origin, opened in the kiosk profile, cannot open
-  a websocket to any editor port (§3, cross-site requests).
+- [ ] The kiosk profile opens every editor with no prompt and no password.
+- [ ] A fresh Firefox profile gets `400` on every port.
+- [ ] From the dev-vm codespace: `curl -k https://172.17.0.1:8000/` gets `400`,
+      and `curl http://<another container's ip>:8080/` is refused.
+- [ ] `env | grep -i password` in a codespace shows no editor credential.
+- [ ] Firefox accepts the ten-year server certificate under the imported root.
+- [ ] Firefox rejects a certificate the CA signs for `example.com`
+      (name constraints honoured, as OpenSSL does).
+- [ ] VS Code webviews (Markdown preview, an extension's panel) still load —
+      they run in iframes, and their requests must count as same-origin for
+      the Fetch Metadata rule.
+- [ ] A page served from another origin, opened in the kiosk profile, cannot
+      open a websocket or POST to any editor port.

@@ -19,7 +19,7 @@ current. This file only covers what *changes* when the workbench moves.
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
 | Planned, not built | Scoped GitHub credentials per codespace — [docs/GITHUB-APP.md](docs/GITHUB-APP.md). Today every container can act as the whole account |
-| Planned, not built | Editor access by client certificate — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). Today every container holds the hub password and can reach the hub, which is root on the VM |
+| Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). Built and tested in a container; the VM and Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
 `/persist`, never in git. `paths.nix` records the locations and no values.
@@ -40,9 +40,6 @@ These were built from documentation and inspection only:
   `git-allowed-signers`, `git-identity-template`, `github-known-hosts` were all
   verified by reading the generated unit files, never by running them. All of
   them have now run clean on the VM — see below — but only on the happy path.
-- **The editor proxy.** Every launcher test used a fake `sudo systemctl` that
-  ran `socat` directly. It now serves a real editor; its behaviour under
-  failure, restart and `reset-failed` is still unverified.
 - **The Windows side:** `scripts/codespace-kiosk.ps1` parses under pwsh and its
   URL resolution is tested, but it has never launched Firefox.
 
@@ -81,7 +78,8 @@ If you touch any of these, you can now test them properly rather than by proxy.
 - **The systemd units, on the happy path** (`vm unit …`): `git-allowed-signers`,
   `git-identity-template` and `github-known-hosts` exit 0 at boot;
   `codespace-gc.timer` fires daily and the sweep logs "nothing idle past 60d";
-  `code-server`, `docker` and `codespace-proxy@dev-vm` run. No failed units.
+  `code-server`, `docker` and `codespace-proxy@dev-vm` ran. No failed units.
+  (`codespace-proxy@` has since been replaced by nginx.)
 - **`rebuild` stops when nothing changed:** a second `rebuild` printed
   `no changes: already running …` and did not switch.
 - **docker-in-docker on a 24.04 image**, in a throwaway codespace: the feature
@@ -102,8 +100,11 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-Nothing. Everything built from the Codespace has now run on the VM; what is
-still untested is listed under "never tested" above.
+- **Editor access by client certificate.** Tested in a container against the
+  real code-server, nginx and the generated nginx config; never yet on the VM
+  or in Firefox. Cutover order and the remaining checks are
+  [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md) §4 and §5. Every codespace needs
+  one `codespace rebuild` for its socket mount.
 
 ### Test scaffolding you no longer need
 
@@ -152,8 +153,8 @@ The Nix store lives on a named docker volume (`dev-vm-nix-store`), so recreating
 the container does not re-download nixpkgs. Evaluating this flake is about 40
 seconds cold and 10 warm.
 
-> The hub editor on `http://localhost:8000/` still works and needs no setup,
-> since it runs on the VM and has Nix natively. Use whichever you prefer — the
+> The hub editor on `https://localhost:8000/` works too, behind the same
+> certificate, since it runs on the VM and has Nix natively. Use whichever you prefer — the
 > codespace keeps the tooling out of the VM, the hub avoids a second Nix store.
 
 ### The one thing the container cannot do
@@ -223,7 +224,11 @@ typo and watching `SC2154` stop it.
   cache/                         shared download cache, bind-mounted in every
                                  container — the code-server tarball, once
   <name>/                        port, generated devcontainer.json, secrets, last_used
-/persist/code-server/pw          hub editor password, generated on first boot
+/persist/code-server/           hub editor extensions and state (a leftover `pw`
+                                 is no longer read — delete it)
+/persist/tls/                    editor CA, nginx's certificate, your browser's
+                                 client.p12 + client.pass — root only
+/run/editors/<port>/             each editor's unix socket; nginx picks by port
 /persist/ssh/                    SSH *host* keys — the machine's identity —
                                  and authorized_keys.dev, read by sshd for key login
 /persist/secrets/                spare 0700 dir, root-owned (sudo to use it)

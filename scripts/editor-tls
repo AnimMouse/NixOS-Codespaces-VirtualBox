@@ -1,0 +1,98 @@
+# editor-tls — the certificates behind editor access, made once into @TLS_DIR@.
+#
+#   ca.key, ca.crt          the VM's own CA, name-constrained to localhost
+#   server.key, server.crt  what nginx presents on every editor port
+#   client.key, client.crt  your browser's identity...
+#   client.p12, client.pass ...packaged for import, and its passphrase
+#
+# Nothing that exists is overwritten. A certificate the current CA did not sign
+# is remade, so rotating everything is `sudo rm -r @TLS_DIR@` and a restart of
+# this unit — then import the new client.p12 and ca.crt again.
+#
+# Ten years for all three. A private root is exempt from browsers' leaf
+# lifetime limits, which apply to public CAs, and a renewal here means a manual
+# re-import, so the fewer the better. Rotation is the revocation story anyway.
+#
+# Built by modules/editor-tls.nix with pkgs.writeShellApplication; runs as root.
+
+TLS=@TLS_DIR@
+EXPORT=@EXPORT_DIR@
+DAYS=3650
+
+umask 077
+mkdir -p "$TLS"
+# nginx reads ca.crt and the server pair; nothing else here is its business.
+chown root:nginx "$TLS"
+chmod 0750 "$TLS"
+cd "$TLS"
+
+new_key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1"; }
+
+if [ ! -s ca.key ] || [ ! -s ca.crt ]; then
+  echo "creating the editor CA"
+  new_key ca.key
+  # nameConstraints, critical: Firefox is told to trust this CA for websites,
+  # so a leaked ca.key must not be able to vouch for anything but localhost.
+  openssl req -x509 -new -key ca.key -out ca.crt -days "$DAYS" \
+    -subj "/CN=dev-vm editor CA" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "nameConstraints=critical,permitted;DNS:localhost,permitted;IP:127.0.0.1/255.255.255.255" \
+    -addext "subjectKeyIdentifier=hash"
+fi
+chmod 0644 ca.crt
+
+signed_by_ca() { [ -s "$1" ] && openssl verify -CAfile ca.crt "$1" >/dev/null 2>&1; }
+
+# $1 name, $2 subject, then -addext arguments
+issue() {
+  local name=$1 subject=$2; shift 2
+  local -a ext=()
+  local e
+  for e in "$@"; do ext+=(-addext "$e"); done
+  new_key "$name.key"
+  openssl req -new -key "$name.key" -subj "$subject" "${ext[@]}" -out "$name.csr"
+  openssl x509 -req -in "$name.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -days "$DAYS" -copy_extensions copyall -out "$name.crt"
+  rm -f "$name.csr"
+}
+
+if ! signed_by_ca server.crt; then
+  echo "creating the editor server certificate"
+  issue server "/CN=localhost" \
+    "basicConstraints=critical,CA:FALSE" \
+    "keyUsage=critical,digitalSignature" \
+    "extendedKeyUsage=serverAuth" \
+    "subjectAltName=DNS:localhost,IP:127.0.0.1"
+  # nginx was started against the old pair, if any; it rereads on reload.
+  # --no-block: this unit is ordered before nginx, so waiting on a queued
+  # nginx start from in here would deadlock.
+  systemctl --no-block try-reload-or-restart nginx.service || true
+fi
+chown root:nginx server.key
+chmod 0640 server.key
+chmod 0644 server.crt
+
+if ! signed_by_ca client.crt || [ ! -s client.p12 ]; then
+  echo "creating the editor client certificate"
+  issue client "/CN=dev-vm editors" \
+    "basicConstraints=critical,CA:FALSE" \
+    "keyUsage=critical,digitalSignature" \
+    "extendedKeyUsage=clientAuth"
+  # Firefox will not import a PKCS#12 without a passphrase. Random, and printed
+  # once below, as the editor password used to be.
+  head -c 18 /dev/urandom | base64 | tr -d '/+=' > client.pass
+  openssl pkcs12 -export -inkey client.key -in client.crt -certfile ca.crt \
+    -name "dev-vm editors" -passout file:client.pass -out client.p12
+
+  # A dev-readable copy to scp from Windows, since this directory is not.
+  # Delete it after importing; the originals stay here.
+  install -d -o dev -g users -m 0700 "$EXPORT"
+  install -o dev -g users -m 0600 client.p12 "$EXPORT/client.p12"
+  install -o dev -g users -m 0644 ca.crt "$EXPORT/ca.crt"
+
+  echo "client certificate created. Import into the Firefox profile you use for editors:"
+  echo "  files:      $EXPORT/client.p12 and $EXPORT/ca.crt"
+  echo "  passphrase: $(cat client.pass)"
+  echo "It is kept in $TLS/client.pass and will not be printed again."
+fi

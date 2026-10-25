@@ -11,14 +11,17 @@ in
     user = "dev";
     group = "users";
 
-    # Must be 0.0.0.0, not 127.0.0.1: VirtualBox's NAT forward delivers to the
-    # guest's own address, so a loopback bind inside the VM is unreachable. The
-    # forward itself is bound to 127.0.0.1 on the Windows side, which is what
-    # keeps this off the LAN.
-    host = "0.0.0.0";
-    port = 8000;
-
-    auth = "password";
+    # A unix socket, not a port: nginx (modules/editor-proxy.nix) is the only
+    # way in, and it has already checked the client certificate, so the editor
+    # itself asks for nothing. It used to listen on 0.0.0.0:8000 with a
+    # password — reachable from every container, which all held that password.
+    # host/port are still passed by the module and ignored by code-server.
+    #
+    # In the setgid-nginx directory, so the socket gets nginx's group and 0660
+    # is enough for nginx to connect.
+    socket = "/run/editors/8000/editor.sock";
+    socketMode = "0660";
+    auth = "none";
 
     # On /persist so installed extensions and editor state survive a wipe of
     # system.vdi. Open VSX is the only marketplace code-server can reach —
@@ -32,46 +35,11 @@ in
     extraPackages = with pkgs; [ git ];
   };
 
-  # §8: no password hash may be committed to a public repo, so one is generated
-  # on first boot and logged to the journal exactly once. The module already
-  # sets HASHED_PASSWORD (empty by default, which code-server treats as unset),
-  # so PASSWORD from this file is what takes effect.
-  systemd.services.code-server-password = {
-    description = "Generate the code-server password on first boot";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "code-server.service" ];
-    unitConfig.RequiresMountsFor = stateDir;
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      UMask = "0077";
-    };
-    path = with pkgs; [ coreutils ];
-    script = ''
-      mkdir -p ${stateDir}
-      chmod 0751 ${stateDir}
-
-      if [ ! -s ${stateDir}/pw ]; then
-        tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 24 > ${stateDir}/pw
-        echo
-        echo "code-server password generated: $(cat ${stateDir}/pw)"
-        echo "It is stored in ${stateDir}/pw and will not be printed again."
-      fi
-
-      # Readable by dev: both code-server itself and the codespace launcher
-      # need it, and the launcher runs unprivileged.
-      chown dev:users ${stateDir}/pw
-      chmod 0640 ${stateDir}/pw
-
-      printf 'PASSWORD=%s\n' "$(cat ${stateDir}/pw)" > ${stateDir}/env
-      chown dev:users ${stateDir}/env
-      chmod 0640 ${stateDir}/env
-    '';
-  };
-
-  systemd.services.code-server = {
-    after = [ "code-server-password.service" ];
-    requires = [ "code-server-password.service" ];
-    serviceConfig.EnvironmentFile = "${stateDir}/env";
-  };
+  # The socket directory, made here as well as by tmpfiles: on a switch the
+  # tmpfiles rules are re-applied by sysinit-reactivation.target, with nothing
+  # ordering that before this unit's restart. `+` runs it as root, which the
+  # nginx group needs; idempotent, and it repairs a mode if anything drifted.
+  systemd.services.code-server.serviceConfig.ExecStartPre = [
+    "+${pkgs.coreutils}/bin/install -d -o dev -g nginx -m 2750 /run/editors /run/editors/8000"
+  ];
 }

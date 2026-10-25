@@ -89,6 +89,7 @@ in
         "/persist/ssh"
         "/persist/secrets"
         "/persist/code-server"
+        "/persist/tls"
         "/persist/home"
         "/persist/codespace/secrets"
         "/run/user"

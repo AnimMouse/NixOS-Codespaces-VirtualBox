@@ -36,8 +36,15 @@ VM_CONTROL_DIR=/run/vm-control
 CONTAINER_VM=/mnt/vm
 # This VM's own flake checkout: its codespace gets the control socket by default.
 FLAKE_DIR=@FLAKE_DIR@
-PW_FILE=/persist/code-server/pw
-EDITOR_PORT=8080
+# One directory per editor port, holding that editor's unix socket — nginx
+# (modules/editor-proxy.nix) picks it by the port a request came in on, after
+# checking the client certificate. Mounted into the container at
+# CONTAINER_EDITOR. The directory rather than the socket, so a restarted editor's
+# new socket is the one nginx sees.
+EDITORS_DIR=/run/editors
+CONTAINER_EDITOR=/mnt/editor
+# The client certificate's dev-readable copy, left by editor-tls until imported.
+TLS_EXPORT=$HOME/tls
 # Real Codespaces deletes a codespace after 30 days of inactivity. Same default
 # here, overridable from $STATE/config; 0 disables the sweep entirely. Only the
 # *container* goes — see cmd_gc.
@@ -223,9 +230,10 @@ idle_days() {
   echo $(( (now - used) / 86400 ))
 }
 
-editor_password() {
-  [ -r "$PW_FILE" ] || die "$PW_FILE missing — is the code-server module active?"
-  cat "$PW_FILE"
+# Asks the editor itself, over its socket — never a process listing (§8).
+editor_answers() {
+  curl -fsS -o /dev/null --max-time 3 --unix-socket "$EDITORS_DIR/$1/editor.sock" \
+    http://localhost/healthz 2>/dev/null
 }
 
 cmd_up() {
@@ -445,6 +453,20 @@ cmd_up() {
   # store, for the codespaces allowed them (vm_control_for). The directory, not
   # the socket, so a restart of the socket unit does not strand the container
   # on a dead inode. Only takes effect on create, like every mount here.
+  # The editor's socket directory. Made on every `up`, not just at create:
+  # /run is a tmpfs, so after a VM reboot it is gone, and docker refuses to
+  # start a container whose bind-mount source does not exist.
+  #
+  # As root, because it must end up setgid nginx — that is what gives the
+  # socket nginx's group — and Linux clears the setgid bit on any chmod by a
+  # user outside the directory's group, which dev is. A plain mkdir + chmod
+  # here produced a socket nginx could not open. `install -d` sets all three
+  # exactly, and on an existing directory repairs it in place rather than
+  # replacing the inode a running container has mounted.
+  sudo install -d -o "$(id -un)" -g nginx -m 2750 "$EDITORS_DIR/$port" \
+    || die "could not create $EDITORS_DIR/$port — is modules/editor-proxy.nix applied?"
+  args+=(--mount "type=bind,source=$EDITORS_DIR/$port,target=$CONTAINER_EDITOR")
+
   local want_vm=0
   if vm_control_for "$name" "$ws"; then
     want_vm=1
@@ -734,21 +756,32 @@ cmd_up() {
   # up with no workspace at all: the code is mounted and the container is fine,
   # but the file tree is empty and terminals start in $HOME.
   #
-  # Liveness is asked of the editor over HTTP, not inferred from a process
-  # listing. `pgrep -f` was doing the latter and getting it wrong: the shell
-  # running the check had /tmp/code-server.args on its own command line, which
-  # supplied "code-server", while the pattern text supplied "--bind-addr", and
+  # A container created before editors moved onto sockets has no
+  # $CONTAINER_EDITOR mount, and `up` cannot add one: mounts are fixed at
+  # create. Its editor listens on a TCP port nginx never forwards to.
+  case " $mounts " in
+    *" $CONTAINER_EDITOR "*) ;;
+    *) die "$name was created before editors moved behind nginx and has no socket mount.
+  'codespace rebuild $name' recreates it (the checkout and volumes are kept)." ;;
+  esac
+
+  # Liveness is asked of the editor itself, over its socket, not inferred from a
+  # process listing. `pgrep -f` was doing the latter and getting it wrong: the
+  # shell running the check had /tmp/code-server.args on its own command line,
+  # which supplied "code-server", while the pattern text supplied the rest, and
   # `.*` bridged the two — so the check matched itself and reported a dead
   # editor as running. After a VM reboot the args file survives in the container
   # while the process does not, which is exactly when that mattered.
   #
   # Asking the endpoint is also the thing we actually care about: an editor that
   # is running but not answering is no more use than one that is gone.
-  local want="0.0.0.0:$EDITOR_PORT $remote_ws" have="" cip="" editor_live=0
-  cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid" 2>/dev/null)
-  if [ -n "$cip" ] && curl -fsS -o /dev/null --max-time 3 "http://$cip:$EDITOR_PORT/login" 2>/dev/null; then
-    editor_live=1
-  fi
+  #
+  # --auth none, because nothing reaches this socket except nginx, which has
+  # already checked the client certificate — and no password means nothing
+  # here holds a credential for any other editor.
+  local sock="$CONTAINER_EDITOR/editor.sock"
+  local want="$sock $remote_ws" have="" editor_live=0
+  editor_answers "$port" && editor_live=1
   # The arguments are recorded next to the log so an editor started by an older
   # version of this script — or on a different folder — is replaced rather than
   # left running.
@@ -756,59 +789,40 @@ cmd_up() {
 
   if [ "$editor_live" = 0 ] || [ "$have" != "$want" ]; then
     note "starting editor on $remote_ws"
-    docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--bind-addr' >/dev/null 2>&1; exit 0"
-    local -a envargs=(-e "PASSWORD=$(editor_password)")
+    docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--(bind-addr|socket)' >/dev/null 2>&1; exit 0"
+    local -a envargs=()
     case "$git_ssh" in
       agent)   envargs+=(-e "SSH_AUTH_SOCK=$agent_sock" -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
       keyfile) envargs+=(-e "GIT_SSH_COMMAND=$ssh_cmd") ;;
     esac
-    docker exec -d -u "$remote_user" "${envargs[@]}" "$cid" bash -lc \
+    # 0660 with nginx's group, inherited from the setgid directory.
+    docker exec -d -u "$remote_user" ${envargs[@]+"${envargs[@]}"} "$cid" bash -lc \
       "printf '%s' \"$want\" > /tmp/code-server.args
-       exec code-server --bind-addr 0.0.0.0:$EDITOR_PORT --auth password \
+       exec code-server --socket $sock --socket-mode 660 --auth none \
          --disable-telemetry --disable-update-check \
          \"$remote_ws\" >/tmp/code-server.log 2>&1"
-  fi
-
-  # The CLI has no way to publish a port on a container it creates, so the
-  # editor is reached through a proxy on the VM. See modules/codespace.nix.
-  #
-  # reset-failed first: a unit that hit its start limit refuses `restart`
-  # outright, and the failure is otherwise indistinguishable from a broken
-  # editor. And check the result — ignoring it is what made this look like the
-  # editor's fault.
-  sudo systemctl reset-failed "codespace-proxy@$name.service" 2>/dev/null || true
-  if ! sudo systemctl restart "codespace-proxy@$name.service"; then
-    die "could not start the editor proxy. See: systemctl status codespace-proxy@$name"
   fi
 
   note "waiting for the editor"
   local i
   for i in $(seq 1 30); do
-    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$port/login" 2>/dev/null; then break; fi
+    editor_answers "$port" && break
     if [ "$i" = 30 ]; then
-      # "Nothing on the port" has two completely different causes with
-      # completely different fixes, so say which one it is rather than making
-      # the reader guess.
-      local cip
-      cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid" 2>/dev/null)
-      if [ -n "$cip" ] && curl -fsS -o /dev/null --max-time 3 "http://$cip:$EDITOR_PORT/login" 2>/dev/null; then
-        note "the editor is up inside the container at $cip:$EDITOR_PORT,"
-        note "but nothing answers on http://127.0.0.1:$port/ — so the proxy is at fault:"
-        note "    systemctl status codespace-proxy@$name"
-        note "    journalctl -u codespace-proxy@$name -n 20"
-      else
-        note "the editor is not answering inside the container either:"
-        note "    codespace logs $name"
-      fi
-      die "editor did not answer on port $port"
+      note "the editor is not answering on its socket:"
+      note "    codespace logs $name"
+      die "editor did not answer"
     fi
     sleep 1
   done
+  # The editor answering is half of it; nginx is the other half, and the
+  # launcher cannot test it end to end without the client key, which it
+  # deliberately cannot read.
+  systemctl is-active --quiet nginx.service \
+    || note "warning: nginx is not running, so the editor is unreachable: systemctl status nginx"
 
   echo
   echo "  $name is up"
-  echo "  http://localhost:$port/"
-  echo "  password: $(editor_password)"
+  echo "  https://localhost:$port/"
   [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
   [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
@@ -817,13 +831,17 @@ cmd_up() {
   [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
   echo
   echo "  F1 opens the command palette. Ctrl+Shift+P is a Firefox private window."
+  if [ -d "$TLS_EXPORT" ]; then
+    echo
+    echo "  Not imported yet? $TLS_EXPORT holds the client certificate for Firefox:"
+    echo "  README, 'Editor access'. Delete $TLS_EXPORT once it is imported."
+  fi
 }
 
 cmd_down() {
   [ $# -ge 1 ] || usage
   local name cid
   name=$(slugify "$1")
-  sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
   cid=$(container_of "$name")
   if [ -n "$cid" ]; then
     note "stopping $name"
@@ -1115,7 +1133,6 @@ cmd_rm() {
   fi
 
   warn_ephemeral "$name"
-  sudo systemctl stop "codespace-proxy@$name.service" 2>/dev/null || true
 
   cid=$(container_any "$name")
 
@@ -1222,7 +1239,7 @@ cmd_list() {
     [ -f "$dir/port" ] || continue
     port=$(cat "$dir/port")
     read -r status idle <<<"$(codespace_state "$name")"
-    printf '%-22s %-6s %-8s %-6s %s\n' "$name" "$port" "$status" "$idle" "http://localhost:$port/"
+    printf '%-22s %-6s %-8s %-6s %s\n' "$name" "$port" "$status" "$idle" "https://localhost:$port/"
   done
 }
 

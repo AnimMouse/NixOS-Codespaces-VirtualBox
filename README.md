@@ -2,7 +2,7 @@
 
 A self-hosted GitHub Codespaces: a headless NixOS VM under VirtualBox on a
 Windows host, serving per-project dev containers whose `code-server` editors you
-open in Firefox at `http://localhost:<port>`.
+open in Firefox at `https://localhost:<port>`.
 
 The VM is declared entirely in this repo. Containers are disposable and follow
 the standard Dev Container spec, so `devcontainer.json` files stay portable to
@@ -184,6 +184,40 @@ That is the whole setup. `codespace up <repo>` from here.
 
 # Daily use
 
+## 5. Editor access: a certificate in Firefox
+
+Editors have no password. nginx on the VM lets a browser through only if it
+presents a client certificate signed by the VM's own CA, made on first boot into
+`/persist/tls`. Import it once into the Firefox profile you open editors in —
+the kiosk launcher's `codespace` profile, below:
+
+```powershell
+scp -P 2222 "dev@localhost:tls/*" .                              # client.p12, ca.crt
+ssh -p 2222 dev@localhost 'sudo cat /persist/tls/client.pass'     # the .p12 passphrase
+```
+
+Then in that Firefox profile, `about:preferences#privacy` → **View
+Certificates**:
+
+1. **Your Certificates** → Import → `client.p12`, with the passphrase.
+2. **Authorities** → Import → `ca.crt`, tick *Trust this CA to identify
+   websites*. The CA is name-constrained to `localhost` and `127.0.0.1`, so it
+   cannot vouch for any other site even if its key leaked.
+3. `about:config` → `security.default_personal_cert` → `Select Automatically`,
+   so Firefox stops asking which certificate to send.
+
+Then delete both files on Windows and on the VM: `ssh -p 2222 dev@localhost
+'rm -r ~/tls'`. The originals stay in `/persist/tls`, so they survive a
+reinstall and you import once per Firefox profile, not per VM.
+
+A profile without the certificate gets nginx's `400 No required SSL certificate
+was sent` on every port — that is the design, not a fault. So does every
+container and every other program on Windows.
+
+To rotate (a lost or copied `.p12`): `sudo rm -r /persist/tls && sudo systemctl
+restart editor-tls`, then import the new pair. The old certificate stops
+working at once.
+
 ## Working on a project
 
 ```bash
@@ -200,8 +234,8 @@ the first time, `codespace up project` is enough. Repos are cloned to
 `/persist/repos/<name>`.
 
 Each codespace keeps its **port** in `/persist/codespace/<name>/`, so a bookmark
-stays valid across a `down`/`up`. Open the printed `http://localhost:<port>/`;
-the password is shared with the hub editor and printed by `up`.
+stays valid across a `down`/`up`. Open the printed `https://localhost:<port>/`
+in the profile holding the certificate (setup step 5).
 
 | Command | What it does |
 |---|---|
@@ -456,12 +490,13 @@ else.
 
 ## The hub editor
 
-`http://localhost:8000/` is code-server on the VM itself — for managing repos
+`https://localhost:8000/` is code-server on the VM itself — for managing repos
 and editing this flake. It has the real Nix toolchain; a dev container does not.
+Behind the same certificate as every other editor (setup step 5).
 
-```bash
-cat /persist/code-server/pw       # the password, generated on first boot
-```
+It is a shell on the VM with passwordless sudo, so it is the editor that most
+needs guarding. It listens on a unix socket, not a port; no container can reach
+it, and none holds a credential for it.
 
 Extensions and editor state live under `/persist/code-server/`, so they survive
 a `system.vdi` wipe.
@@ -752,7 +787,8 @@ It is used **only while the repo has no config of its own**. Commit a real
 /persist/home/dev/       the dev user's home (/home/dev symlinks here)
 /persist/docker/         images, volumes, containers
 /persist/codespace/      per-codespace port + config, launcher config, secrets
-/persist/code-server/    hub editor password, extensions, state
+/persist/code-server/    hub editor extensions and state
+/persist/tls/            the editor CA, nginx's certificate, your browser's (root only)
 /persist/secrets/        anything else, mode 0700
 ```
 
@@ -785,7 +821,8 @@ hosts/dev/
 modules/
   persist.nix                   /persist wiring, host keys, home
   docker.nix                    Docker, data-root on /persist, autoprune
-  code-server.nix               hub editor + first-boot password
+  code-server.nix               hub editor, on a unix socket
+  editor-proxy.nix              nginx with client certificates, and the CA
   codespace.nix                 launcher package + editor proxy unit
   vm-control.nix                read-only control socket for the flake's codespace
   home.nix                      home-manager wiring + git identity units
@@ -795,12 +832,13 @@ paths.nix                       where identity and key material live (paths only
 scripts/codespace               the launcher
 scripts/rebuild                 rebuild [--pull] [--force]
 scripts/ssh-auth                unlock the git key into the agent
+scripts/editor-tls              make the CA and certificates, once
 scripts/vm-control              VM side of the control socket
 scripts/vm                      container side: `vm status`, `vm build`, …
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 docs/BOOTSTRAP.md               full install walkthrough
 docs/GITHUB-APP.md              plan: scoped GitHub credentials per codespace
-docs/EDITOR-MTLS.md             plan: editor access by client certificate, no password
+docs/EDITOR-MTLS.md             editor access by client certificate: design and tests
 CLAUDE.md                       design decisions and constraints
 ```
 
@@ -826,15 +864,22 @@ on the host**, and that one fact drives most of the design:
   order, differently on the ISO than on the installed system.
 - **Distinct ports, not subdomain routing** — `*.localhost` resolution is
   inconsistent across platforms.
-- **NAT bound to `127.0.0.1`, no host-only adapter.** `http://localhost` is a
-  browser secure context; `http://192.168.56.x` is not, which breaks the
-  Clipboard API and several code-server features.
+- **NAT bound to `127.0.0.1`, no host-only adapter.** `localhost` is a browser
+  secure context; `http://192.168.56.x` is not, which breaks the Clipboard API
+  and several code-server features.
+- **Editors behind a client certificate, not a password.** A shared password
+  sat in every container's environment and opened the hub, which is root on the
+  VM. nginx now requires a certificate only your browser has, every editor
+  listens on a unix socket so nginx is the only way in, and requests a browser
+  marks cross-site are refused. `docs/EDITOR-MTLS.md` has the reasoning and
+  what was tested.
 
 The VM stays thin: no X11, no desktop, no toolchains. Those belong in containers,
 which is also why NixOS's FHS incompatibility is a non-issue here.
 
 Three things the devcontainer CLI cannot do, which the launcher fills in:
-publishing a port (a `codespace-proxy@` unit runs `socat` to the container),
+publishing a port (the editor's socket directory is mounted from the VM, where
+nginx finds it by port),
 installing code-server (no third-party feature resolves on ghcr, so the official
 install script runs after every `up`), and stopping a container at all.
 
@@ -845,9 +890,12 @@ install script runs after every `up`), and stopping a container at all.
 | Symptom | Cause |
 |---|---|
 | **Turtle icon** in the VirtualBox status bar | Hyper-V leaked back; performance drops 2–5×. `bcdedit /set hypervisorlaunchtype off`, reboot Windows |
-| Editor URL will not load | `codespace up` now says which half is broken. Otherwise: `codespace logs <name>` for the editor, `systemctl status codespace-proxy@<name>` for the proxy |
-| After a VM reboot, `codespace up` says the editor is not answering and `codespace logs` shows nothing newer than the shutdown | The editor is not being restarted. Fixed — `up` now probes the editor over HTTP instead of looking for its process, so a container that was stopped with the VM gets its editor started again |
-| `editor did not answer on port NNNN`, but `codespace logs` shows a healthy editor | The proxy, not the editor. A unit that failed repeatedly used to hit systemd's start rate limit and then refuse `restart` outright. Fixed by disabling the limit and calling `reset-failed`; to clear an already-wedged one: `sudo systemctl reset-failed codespace-proxy@<name>` |
+| Editor URL will not load | `codespace up` reports the editor itself. If it says the editor is up: `systemctl status nginx` on the VM, and check the URL is `https://` |
+| `400 No required SSL certificate was sent` | This Firefox profile has no client certificate — setup step 5. Expected for any other profile |
+| `403 Forbidden` from nginx, with the certificate imported | The request came from another site or another editor's port (Fetch Metadata). Open the editor's URL directly — typed, bookmarked, or the kiosk launcher |
+| `502 Bad Gateway` | nginx is fine; no editor is on that port's socket. `codespace up <name>` |
+| `<name> was created before editors moved behind nginx` | Its container has no socket mount, and mounts are fixed at create. `codespace rebuild <name>` — checkout and volumes are kept |
+| After a VM reboot, `codespace up` says the editor is not answering and `codespace logs` shows nothing newer than the shutdown | The editor is not being restarted. Fixed — `up` probes the editor's socket instead of looking for its process, so a container that was stopped with the VM gets its editor started again |
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |

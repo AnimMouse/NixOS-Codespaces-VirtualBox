@@ -19,13 +19,14 @@ FLAKE_ATTR=@FLAKE_ATTR@
 TOPLEVEL="$FLAKE_DIR#nixosConfigurations.$FLAKE_ATTR.config.system.build.toplevel"
 
 # Units whose status and journal a codespace may read. An allowlist, because
-# the journal is not harmless: code-server-password prints the hub editor's
-# password there on first boot, and the hub editor is a shell with sudo.
+# the journal is not harmless: editor-tls prints the client certificate's
+# passphrase there once, and code-server-password's history still holds the
+# password the editors used before they moved behind nginx.
 allowed_unit() {
   case "$1" in
-    code-server-password*) return 1 ;;
-    code-server|code-server.service) ;;
-    codespace-proxy@*|codespace-gc|codespace-gc.service|codespace-gc.timer) ;;
+    code-server-password*|editor-tls*) return 1 ;;
+    code-server|code-server.service|nginx|nginx.service) ;;
+    codespace-gc|codespace-gc.service|codespace-gc.timer) ;;
     git-allowed-signers*|git-identity-template*|github-known-hosts*) ;;
     docker|docker.service|docker.socket) ;;
     sshd|sshd.service|nix-daemon|nix-daemon.service|nix-gc*|nix-optimise*) ;;

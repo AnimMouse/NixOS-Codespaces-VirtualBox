@@ -48,7 +48,7 @@ function Resolve-Url {
   param([string]$T)
 
   if ($T -match '^https?://') { return $T }
-  if ($T -match '^\d+$')      { return "http://localhost:$T/" }
+  if ($T -match '^\d+$')      { return "https://localhost:$T/" }
 
   # A codespace name: ask the VM which port it was given.
   Write-Verbose "Looking up '$T' on the VM over SSH"
@@ -60,7 +60,7 @@ function Resolve-Url {
     $f = ($row -split '\s+') | Where-Object { $_ -ne '' }
     # -match '^\d+$' also skips the header row, whose second column is "PORT".
     if ($f.Count -ge 2 -and $f[0] -eq $T -and $f[1] -match '^\d+$') {
-      return "http://localhost:$($f[1])/"
+      return "https://localhost:$($f[1])/"
     }
   }
   throw "No codespace named '$T'. Run: ssh -p $SshPort dev@localhost codespace list"
