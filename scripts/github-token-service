@@ -7,7 +7,8 @@ docs/GITHUB-APP.md §4.3.
     GET /token   the token, as plain text — what a git credential helper or
                  a gh shim needs, readable with nothing but curl. With
                  ?repo=owner/name, the token for that repository; without,
-                 the one for the codespace's own
+                 the one for the codespace's own. Asked from the VM itself,
+                 the account-wide token (docs/GITHUB-APP.md §6.1)
     GET /whoami  which codespace and repositories this caller is entitled to,
                  and the cached tokens' expiry; never a token itself
     POST /revoke?container=<id>
@@ -100,7 +101,12 @@ def pidfd_pid(pidfd):
 
 def caller_container():
     """The full ID of the Docker container the connecting process is in, or
-    None for a process on the VM itself."""
+    None for a process on the VM itself.
+
+    The VM means two things at once: no Docker container in the cgroup, and
+    the broker's own PID namespace. A container that escaped its cgroup —
+    which takes a privileged one — still has its own PID namespace, so it is
+    refused rather than mistaken for the VM and handed the account token."""
     s = socket.socket(fileno=0)
     try:
         pidfd = s.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
@@ -112,13 +118,24 @@ def caller_container():
             raise Refusal(403, "the connecting process has already exited\n")
         with open(f"/proc/{pid}/cgroup") as f:
             m = re.search(r"docker[-/]([0-9a-f]{64})", f.read())
+        same_ns = False
+        if not m:
+            try:
+                theirs = os.readlink(f"/proc/{pid}/ns/pid")
+                same_ns = theirs == os.readlink("/proc/self/ns/pid")
+            except OSError:
+                pass
         # The pidfd pins the process, not the number: if it has exited since,
         # the PID read above may now belong to something else.
         if pidfd_pid(pidfd) != pid:
             raise Refusal(403, "the connecting process exited mid-request\n")
     finally:
         os.close(pidfd)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    if not same_ns:
+        raise Refusal(403, "the caller is in no container, yet not on the VM either\n")
+    return None
 
 
 def read_json(path):
@@ -445,8 +462,7 @@ def main():
         return
     try:
         cid = caller_container()
-        # The VM may revoke; only a container may hold a token. Phase 5 gives
-        # the VM tokens of its own (docs/GITHUB-APP.md §6.1).
+        # Only the VM may revoke; a container would revoke its neighbours'.
         if route == ("POST", "/revoke"):
             if cid is not None:
                 raise Refusal(403, "revocation is for the VM, not for a codespace\n")
@@ -460,7 +476,21 @@ def main():
             respond(200, f"revoked {n}\n")
             return
         if cid is None:
-            raise Refusal(403, "not a codespace: the caller is in no container\n")
+            # The VM is trusted, and holds the refresh token anyway; it must
+            # be this broker that answers it, since a second client
+            # refreshing on its own would rotate this one's refresh token out.
+            with open(os.path.join(STATE, "lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                client_id, _ = app_credentials()
+                token, expires = account_token(client_id)
+            if path == "/whoami":
+                respond(200, json.dumps({"caller": "the VM",
+                                         "token": "account-wide",
+                                         "expires": stamp(expires)},
+                                        indent=2) + "\n")
+            else:
+                respond(200, token + "\n")
+            return
         ent_path = os.path.join(ENTITLEMENTS, f"{cid}.json")
         ent = read_json(ent_path)
         if ent is None:

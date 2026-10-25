@@ -1065,7 +1065,7 @@ cmd_up() {
   # In app mode the token comes from the broker instead — scoped to this
   # codespace's repository, not the VM's account-wide one. Asked from inside
   # the container, because the broker knows callers by their container and
-  # would refuse the VM. It lapses in 8 hours; the gh shim below fetches a
+  # would hand the VM its account-wide token. It lapses in 8 hours; the gh shim below fetches a
   # fresh one per run, so this only serves tools that read the variable
   # themselves.
   #
@@ -1082,7 +1082,10 @@ cmd_up() {
       [ -n "$gh_token" ] || [ -z "$token_repo" ] \
         || note "note: the token broker gave no token for $token_repo — see journalctl -u 'codespace-token@*' on the VM"
     else
-      gh_token=$(gh auth token 2>/dev/null || true)
+      # The VM's account-wide token: from the broker since phase 5, which
+      # answers the VM with it, else whatever `gh auth login` stored.
+      gh_token=$(curl -fsS --unix-socket "$AUTH_DIR/token.sock" http://vm/token 2>/dev/null | tr -d '\r\n' || true)
+      [ -n "$gh_token" ] || gh_token=$(gh auth token 2>/dev/null || true)
     fi
   fi
 

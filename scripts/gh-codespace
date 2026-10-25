@@ -15,6 +15,8 @@
 # `gh help` need none, and gh's own error is clearer than refusing outright.
 #
 # Plain sh plus curl, because it runs in whatever image the codespace uses.
+# The VM's own gh runs it too, with CODESPACE_TOKEN_SOCK naming the socket
+# where it is on the VM, and gets the account-wide token (home/dev.nix).
 
 # The real gh: the first on PATH that is not this script.
 real=""
@@ -32,7 +34,7 @@ if [ -z "$real" ]; then
   exit 127
 fi
 
-sock=/mnt/github/token.sock
+sock=${CODESPACE_TOKEN_SOCK:-/mnt/github/token.sock}
 if [ -n "${GH_TOKEN:-}" ]; then
   : # your override; gh will use it and ignore GITHUB_TOKEN anyway
 elif [ -S "$sock" ]; then

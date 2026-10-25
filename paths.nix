@@ -19,6 +19,11 @@
   # github-app-login saves (docs/GITHUB-APP.md). Values only on /persist.
   githubAppDir = "/persist/github-app";
 
+  # The credential services' sockets on the VM (modules/codespace-auth.nix),
+  # mounted into codespaces at /mnt/github. The VM's own git and gh ask the
+  # token broker here too.
+  authDir = "/run/codespace-auth";
+
   # This repo's working copy, and the flake output built from it.
   flakeDir = "/persist/dev-vm";
   flakeAttr = "dev";

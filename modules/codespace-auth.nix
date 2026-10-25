@@ -10,7 +10,7 @@ let
   # nginx only just removed for the editors. The launcher mounts the directory,
   # not the socket, so a restarted socket unit cannot strand a container on a
   # dead inode.
-  dir = "/run/codespace-auth";
+  dir = p.authDir;
 
   # The token broker's own state: cached tokens and the entitlements the
   # launcher writes per container. In /run, so cached tokens die with a reboot
