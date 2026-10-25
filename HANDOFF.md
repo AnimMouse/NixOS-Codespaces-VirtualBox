@@ -87,6 +87,12 @@ If you touch any of these, you can now test them properly rather than by proxy.
   the agent hidden was signed by the VM, logged against the container's ID,
   and shows Verified on GitHub. The dotfiles were changed to leave signing
   alone when the VM does it.
+- **`GITHUB_AUTH=app`** (phase 3 of [docs/GITHUB-APP.md](docs/GITHUB-APP.md)),
+  in the dev-vm codespace rebuilt with it: no agent socket, no `SSH_AUTH_SOCK`,
+  no private key, and `ssh -T git@github.com` denied; `GITHUB_TOKEN` set and
+  `GH_TOKEN` not; `gh api user` as the account through the shim, `gh pr list`
+  working and another repo 403; a dry-run push accepted over https and
+  another repo 403; commits signed on the VM.
 - **The token broker** (phase 2 of [docs/GITHUB-APP.md](docs/GITHUB-APP.md)).
   From the dev-vm codespace, with nothing but the token able to authenticate:
   `/whoami` named the codespace and its container, the token is a `ghu_`
@@ -123,13 +129,6 @@ If you touch any of these, you can now test them properly rather than by proxy.
 
 ### Pending a real run
 
-- **`GITHUB_AUTH=app`** (phase 3 of [docs/GITHUB-APP.md](docs/GITHUB-APP.md)).
-  Tested here against the live broker: the app-mode git config on a scratch
-  system config, a push to an SSH-form URL rewritten to https and
-  authenticated by the helper alone, another repo refused with 403, and the
-  gh shim handing a stand-in gh a fresh `ghu_` token. Not yet a container
-  created in app mode: no agent mount, `ssh -T git@github.com` failing, a
-  real push and `gh pr list`, and a signed commit.
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,

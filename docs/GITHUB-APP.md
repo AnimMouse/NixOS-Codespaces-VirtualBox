@@ -392,7 +392,8 @@ Each phase ships on its own and leaves the system working.
    (built, run), the broker (built). Checked by hand with `curl --unix-socket`: a scoped token pushes to
    its repo and is refused by another. Containers still untouched.
 3. **Containers switch — the hole closes here. Built, behind
-   `GITHUB_AUTH=app`.** In one step: stop forwarding
+   `GITHUB_AUTH=app`, and verified in the dev-vm codespace**: no SSH credential
+   in it, git and gh on the scoped token, other repositories refused. In one step: stop forwarding
    the agent and drop keyfile mode, add the credential helper and `gh` shim,
    fill `GH_TOKEN` from the broker, and flip the remote rewrite to https. (The
    dotfiles change already shipped with phase 1.) These cannot be split: taking the agent away before the
