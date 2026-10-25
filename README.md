@@ -97,19 +97,21 @@ forward, and the password is the way back in after a reinstall if the key file
 is ever missing — the lockout assertion can see keys declared in the config,
 not keys in this file.
 
-## 3. GitHub: one SSH key for everything
+## 3. GitHub: an SSH key to sign, an app to authenticate
 
-GitHub keeps authentication keys and signing keys in separate lists but accepts
-the same public key in both. So one key pushes, pulls **and** signs — no token to
-rotate.
+Two credentials, one job each. An **SSH key signs** commits, on the VM and for
+every codespace. A personal **GitHub App authenticates**: git and `gh` on the
+VM use its account-wide token, and each codespace a token scoped to its own
+repository ([docs/GITHUB-APP.md](docs/GITHUB-APP.md)). Register the key on
+GitHub as a signing key only, and a leaked key can sign but push nowhere.
+Nothing to rotate by hand: the broker refreshes the app's tokens, and
+`github-app-login` is needed again only if they go unused for six months.
 
-> **Containers never get the key.** By default (`GITHUB_AUTH=app`, see
-> [GitHub authentication](#github-authentication) and
-> [docs/GITHUB-APP.md](docs/GITHUB-APP.md)) the key stays on the VM, signs
-> there, and codespaces push with tokens scoped to their own repository. That
-> needs the GitHub App registered and one `github-app-login` on the VM — until
-> then a codespace comes up able to sign but not to push, and `up` says so.
-> The agent forwarding described below is `GITHUB_AUTH=legacy`.
+> **Containers never get the key.** It stays on the VM and signs there.
+> Until the app is set up, a codespace comes up able to sign but not to push,
+> and `up` says so. `GITHUB_AUTH=legacy` forwards the agent into containers
+> instead, as described further down — that needs the key registered as an
+> authentication key too.
 
 ```bash
 ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
@@ -132,26 +134,40 @@ the command that cannot work.
 This is the only place your name and email are written down, and it is not in
 this repo.
 
-Add that key at <https://github.com/settings/keys> **twice**:
-
-- once as an **Authentication key**
-- once as a **Signing key**
+Add that key at <https://github.com/settings/keys> as a **Signing key** — not
+as an authentication key: nothing on the VM logs in with it.
 
 > Already signing commits elsewhere? Copy that private key to
 > `/persist/git/id_ed25519` instead of generating a new one, and your whole
-> history keeps verifying under a single key.
+> history keeps verifying under a single key. If that other machine also
+> *authenticates* with it — Git Bash on the Windows host, say — the key has to
+> stay an authentication key too, and can push anywhere if it leaks from
+> either machine. Give the other machine its own authentication key, and this
+> one can be signing-only.
 
-Then check it and log in to `gh` for API work:
+Then register the GitHub App — web UI work, [docs/GITHUB-APP.md
+§4.1](docs/GITHUB-APP.md#41-the-app--by-hand-in-the-github-web-ui) has the
+settings — put its client ID and secret in `/persist/github-app/`, and
+authorise it once:
 
 ```bash
-ssh -T git@github.com                     # "Hi <you>! You've successfully authenticated"
 sudo systemctl restart git-allowed-signers
-gh auth login                             # device flow: open the URL in Firefox on Windows
+github-app-login                          # device flow: open the URL in Firefox on Windows
+gh api user -q .login                     # you, through the app's token
 ```
+
+No `gh auth login`: `gh` on the VM fetches the app's token on every run.
+
+> **Moving a VM set up the old way** — key as an authentication key: once
+> `git push` and `gh` work with `ssh-add -D` run (no key in the agent), delete
+> the key from GitHub's **Authentication keys**, keeping the signing key — and
+> `gh auth logout` if `gh` was ever logged in; `gh auth status` should name
+> `GITHUB_TOKEN` and a `ghu_` token. Then `ssh-auth`, to sign again.
 
 ### If your key has a passphrase
 
-Then it needs to be in the ssh-agent before any container can use it:
+Then it needs to be in the ssh-agent before anything can sign with it — on the
+VM, or for a codespace through the VM's signing service:
 
 ```bash
 ssh-auth        # prompts once per boot; a no-op if already unlocked
@@ -664,19 +680,27 @@ balloon command works on your VirtualBox build before relying on it.
 
 | | |
 |---|---|
-| **SSH** | Used for everything git. No expiry, and it signs commits too |
-| **PAT** | Not used. Expires, cannot sign, and invites being pasted into a remote URL |
-| **OAuth (`gh`)** | The API only — `gh pr create`, `gh repo create`. Git stays on SSH |
+| **GitHub App** | Everything that authenticates: git over https and `gh`, on the VM (account-wide) and in codespaces (scoped). Tokens last 8 hours and are refreshed by the broker |
+| **SSH key** | Signing. Registered on GitHub as a signing key only, unless another machine still authenticates with it |
+| **PAT** | Not used. `export GH_TOKEN=<a PAT>` for one shell when the app cannot reach something — an organisation that has not installed it |
+| **OAuth (`gh auth login`)** | Not used. Its token reaches everything you can, in every org, and cannot be narrowed |
 
-The VM rewrites GitHub https URLs to SSH:
+The VM's git sends GitHub SSH URLs over https, and asks the token broker for a
+password:
 
 ```
-[url "git@github.com:"]
-	insteadOf = https://github.com/
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+[credential "https://github.com"]
+	helper = ""
+	helper = /nix/store/…-git-credential-github-app
 ```
 
-That is what lets `codespace up github.com/you/private-repo` work — the launcher
-clones the https form and git quietly authenticates with the key.
+So a checkout cloned as `git@github.com:…` still pushes, and `codespace up
+github.com/you/private-repo` clones with the app's token. Only repositories
+the app is installed on are reachable — the app's own permissions are the
+ceiling, on the VM as in codespaces. `gh repo create` needs Administration,
+which the app does not have by default.
 
 **How containers get credentials: `GITHUB_AUTH=app`, the default.** No SSH
 credential in containers at all. Needs the GitHub App setup in
@@ -1045,7 +1069,8 @@ install script runs after every `up`), and stopping a container at all.
 | Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
 | `codespace up` hangs at `Executing command ./install.sh...` | Something in the dotfiles install is waiting for input. The usual culprit is `ssh-keygen` on a passphrase-protected key: the tooling gives install.sh a tty, so it prompts and waits forever, and the prompt is usually swallowed. Ctrl-C, then `codespace rebuild <name>`. Keep every `ssh-keygen` in a dotfiles repo non-interactive with `-P ""` |
-| `git@github.com: Permission denied (publickey)` inside a container | Either the key is passphrase-locked with no agent holding it — `ssh-auth`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
+| `git@github.com: Permission denied (publickey)` inside a `GITHUB_AUTH=legacy` container | Either the key is passphrase-locked with no agent holding it — `ssh-auth`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
+| `git push` or `gh` on the VM: "the VM gave no token", or 403 | "has lapsed or was revoked": `github-app-login`. A 403 on one repository: the app is not installed on its owner (docs/GITHUB-APP.md §5), or the app lacks the permission — `gh repo create` needs Administration |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |
 | No Pylance / no official C/C++ extension | code-server uses Open VSX. Pick equivalents in `devcontainer.json` `customizations` |

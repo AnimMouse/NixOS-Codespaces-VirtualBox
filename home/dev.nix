@@ -1,5 +1,29 @@
 { config, lib, pkgs, gitIdentity, ... }:
 
+let
+  # The VM authenticates to GitHub with the GitHub App, as codespaces do
+  # (docs/GITHUB-APP.md §6.1): the same helper and gh shim the containers
+  # run, pointed at the broker's socket on the VM, where it answers with the
+  # account-wide token. The SSH key is left one job, signing — a leaked key
+  # can sign, and push nowhere.
+  tokenSock = "${gitIdentity.authDir}/token.sock";
+  clientEnv = ''
+    export CODESPACE_TOKEN_SOCK=${tokenSock}
+    PATH=${lib.makeBinPath (with pkgs; [ curl coreutils gnused ])}:$PATH
+  '';
+  # dash, as in the containers' images: the clients are POSIX sh.
+  git-credential-github-app = pkgs.writeShellScript "git-credential-github-app" ''
+    ${clientEnv}
+    exec ${lib.getExe pkgs.dash} ${../scripts/git-credential-codespace} "$@"
+  '';
+  # gh reads its token once, at start, and the account token lasts 8 hours:
+  # a fresh one per run, ahead of anything `gh auth login` stored. The shim
+  # finds the real gh on PATH, skipping itself.
+  gh-github-app = pkgs.writeShellScriptBin "gh" ''
+    ${clientEnv}
+    PATH=${pkgs.gh}/bin:$PATH exec ${lib.getExe pkgs.dash} ${../scripts/gh-codespace} "$@"
+  '';
+in
 {
   home.stateVersion = "26.05";
 
@@ -29,14 +53,19 @@
       push.autoSetupRemote = true;
       rebase.autoStash = true;
 
-      # Everything github goes over SSH even when the remote was written as an
-      # https URL. This is what makes `codespace up github.com/you/private-repo`
-      # work: the launcher clones the https form, and git rewrites it to the key
-      # that GitHub actually authenticates.
-      url."git@github.com:".insteadOf = [
-        "https://github.com/"
+      # Everything github goes over https, with the app's token, even when a
+      # remote was written for SSH — the key no longer authenticates anywhere.
+      # Checkouts made before the switch keep git@github.com: remotes, and
+      # this is what lets them still push.
+      url."https://github.com/".insteadOf = [
+        "git@github.com:"
+        "ssh://git@github.com/"
         "github.com:"
       ];
+
+      # The empty entry clears any helper set before this one, so a stray
+      # `gh auth git-credential` or a cache cannot answer first.
+      credential."https://github.com".helper = [ "" "${git-credential-github-app}" ];
     };
   };
 
@@ -80,20 +109,30 @@
   };
 
   # A passphrase-protected key cannot be used by anything that has no terminal
-  # to prompt at — which is every container the launcher creates, and the
-  # dotfiles clone in particular. The agent holds the decrypted key, and only
-  # its socket is handed to containers, so the key itself never leaves the VM.
+  # to prompt at — the VM's signing service for codespaces among them. The
+  # agent holds the decrypted key; GITHUB_AUTH=legacy also hands its socket to
+  # containers, so the key itself never leaves the VM.
   #
   # Socket is $XDG_RUNTIME_DIR/ssh-agent, i.e. /run/user/1000/ssh-agent: the
   # same path every login, which is what makes a container created in one
   # session still work in the next.
   services.ssh-agent.enable = true;
 
-  # For the API — creating repos, opening PRs. Git transport stays on SSH so
-  # there is only one credential that can expire, and it never does.
+  # For the API — opening PRs, reading issues — on the app's token, fetched
+  # per run. Its permissions are the ceiling: whatever the app was registered
+  # with (docs/GITHUB-APP.md §4.1). git's helper is the broker's, above, not
+  # gh's own, which would hand git whatever `gh auth login` stored.
   programs.gh = {
     enable = true;
-    settings.git_protocol = "ssh";
+    package = pkgs.symlinkJoin {
+      name = "gh-github-app-${pkgs.gh.version}";
+      # First wins: bin/gh is the shim; completions and man pages are gh's.
+      paths = [ gh-github-app pkgs.gh ];
+      # home-manager calls getExe on it.
+      meta.mainProgram = "gh";
+    };
+    gitCredentialHelper.enable = false;
+    settings.git_protocol = "https";
   };
 
   programs.bash = {

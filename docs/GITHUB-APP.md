@@ -1,4 +1,4 @@
-# Scoped GitHub credentials — phases 1–4 built and verified, 5 planned
+# Scoped GitHub credentials — phases 1–5 built and verified
 
 Give each codespace a GitHub credential that reaches **only its own
 repository**, the way a real Codespace's `GITHUB_TOKEN` does, using a personal
@@ -10,7 +10,9 @@ Built and verified on the VM: phase 1, signing on the VM
 the app, `github-app-login` and the token broker; phase 3, `GITHUB_AUTH=app` —
 no SSH credential in containers, git and gh on scoped tokens, in use in every
 codespace. Phase 4, parity with Codespaces, is built and checked on the VM
-(§4.7), with two edges open. Phase 5 (the VM itself on the app) is planned. Facts marked *checked* were read from GitHub's
+(§4.7), with two edges open. Phase 5, the VM itself on the app, is built
+and checked (§6.1); the key stays an authentication key on GitHub while the
+Windows host authenticates with it too. Facts marked *checked* were read from GitHub's
 documentation, from source, or observed; facts marked **verify** must be
 confirmed before or during the build, and the design bends if they turn out
 false.
@@ -39,9 +41,10 @@ reaching containers, and signing has to happen somewhere else.
 
 ### What stays
 
-One SSH key, as CLAUDE.md §9 records: it still authenticates and signs, on the
-VM. Containers stop holding it in any form — no agent, no key file — and get a
-scoped token for authentication and a signing *service* for signatures.
+One SSH key, as CLAUDE.md §9 records, kept on the VM. Containers stop holding
+it in any form — no agent, no key file — and get a scoped token for
+authentication and a signing *service* for signatures. Since phase 5 the VM
+only signs with it too (§6.1).
 
 ---
 
@@ -521,8 +524,9 @@ Each phase ships on its own and leaves the system working.
    `customizations.codespaces.repositories`, read-only on repos you cannot
    write, revocation on `rm`. CLAUDE.md §8 (the agent-forwarding rows) and §9
    amended, the gotchas found added, and `app` the default.
-5. **The VM itself on the app — plan.** The SSH key stops authenticating
-   anywhere and only signs. See §6.1.
+5. **The VM itself on the app — built and checked.** Nothing on the VM
+   authenticates with the SSH key; it only signs. Making it signing-only on
+   GitHub waits on the Windows host having its own key. See §6.1.
 
 ### 6.1 Phase 5 — the VM authenticates with the app too
 
@@ -532,23 +536,40 @@ app, leaving the key one job: signing.
 
 **Design**
 
-- **The broker answers the VM.** A caller in no container, running as `dev`,
+- **The broker answers the VM** (`scripts/github-token-service`). A caller
   gets the **account-wide** user token — every repository the app is installed
   on — rather than a scoped one: the VM is trusted, and holds the refresh token
   anyway. It must be the broker, not a second client: two processes refreshing
-  independently would rotate each other's refresh token out. Containers are
-  still known by their cgroup and can never get it. Optionally narrower:
-  with `credential.useHttpPath`, git names the repository, and the helper can
-  ask for a token scoped to just that one, so even the VM holds no more than
-  an operation needs.
+  independently would rotate each other's refresh token out. *The VM* is two
+  conditions, both read from the kernel: no Docker container in the caller's
+  cgroup, **and** the broker's own PID namespace. The second was not in the
+  plan; it costs one `readlink`, and refuses a process that left its
+  container's cgroup — which takes a privileged container — but not its PID
+  namespace. A caller passing neither test is refused, not treated as the VM.
+  Containers still get only their scoped tokens.
+- *Declined*: scoping the VM's git token to the repository of each operation.
+  `gh` on the VM has no repository to name and needs the account-wide token
+  anyway, so the VM would hold it regardless.
 - **The VM's git config flips** (`home/dev.nix`): the https→SSH rewrite goes,
   SSH→https replaces it so checkouts with `git@github.com:` remotes keep
-  working, and a credential helper asks the broker.
-- **gh on the VM** gets a fresh token per run as in containers, and the
-  `gh auth login` OAuth session is removed.
+  working, and the helper the containers use asks the broker, with
+  `CODESPACE_TOKEN_SOCK` pointing it at the socket's path on the VM. An empty
+  helper entry first clears any other, and home-manager's
+  `gh auth git-credential` helper is turned off.
+- **gh on the VM** is the containers' shim too, wrapped as `programs.gh.package`
+  around the real gh, so it gets a fresh token per run; `git_protocol` is
+  `https`. A `gh auth login` OAuth session, if there is one, is removed by
+  hand — the token from the environment outranks it, but it still reaches
+  everything. (This VM never had one.)
+- **`GITHUB_AUTH=legacy`** handed containers the VM's `gh auth token`; it now
+  asks the broker for the account-wide token first. Its agent forwarding can
+  no longer push once the key is signing-only.
 - **On GitHub, the key becomes signing-only**: removed as an Authentication
   key, kept as a Signing key. That is what disables SSH auth — a leaked key
-  could still sign, and could push nowhere.
+  could still sign, and could push nowhere. **Not done**: Git Bash on the
+  Windows host authenticates with the same key, so removing its
+  authentication role would lock Windows out. The VM no longer uses that role;
+  it only stops existing once Windows has an authentication key of its own.
 
 **Day to day**
 
@@ -575,8 +596,16 @@ app, leaving the key one job: signing.
 
 **Checks**
 
+- [x] With the agent emptied (`ssh-add -D`): `gh api user`, `git push
+      --dry-run` from `/persist/dev-vm`, and `git ls-remote` of a private
+      repository all work from the VM; `gh auth status` names `GITHUB_TOKEN`,
+      a `ghu_` token, and https for git. (2026-10-26)
+- [x] Straight after, the dev-vm codespace still got its scoped token: the
+      broker refused it that same private repository, naming its
+      entitlement.
+- [x] After `ssh-auth`, a commit made on the VM signs (`G`).
 - [ ] `ssh -T git@github.com` from the VM is denied once the key is
-      signing-only, while commits made on the VM still show Verified.
+      signing-only — waits on the Windows host's own key.
 - [ ] `git push` and `gh pr list` on the VM work with no agent loaded.
 - [ ] A container still cannot get the account-wide token.
 

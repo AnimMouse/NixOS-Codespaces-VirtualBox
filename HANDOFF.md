@@ -19,7 +19,7 @@ current. This file only covers what *changes* when the workbench moves.
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
-| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) is planned |
+| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) **built and checked** — the VM only signs with the key; making it signing-only on GitHub waits on Windows having its own |
 | Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). In daily use; the remaining Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
@@ -41,6 +41,7 @@ row where something was learnt the hard way.
 | Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
 | GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
+| The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only |
 
@@ -51,7 +52,10 @@ row where something was learnt the hard way.
   read-only planning against an organisation repository you can only read.
   docs/GITHUB-APP.md §4.7. Any codespace still on an agent needs
   `codespace rebuild` now that `app` is the default.
-- **Phase 5**: the VM itself on the app; the SSH key becomes signing-only.
+- **The key's last authentication role** (GitHub App phase 5): Git Bash on the
+  Windows host logs in with the same key, so it is still an authentication key
+  on GitHub. Give Windows its own key, then delete this one from GitHub's
+  Authentication keys and check `ssh -T git@github.com` is denied from the VM.
 - **The kiosk launcher** has never launched Firefox. Its profile check runs
   `firefox -P`, which may open Firefox's profile manager instead.
 - **Phase 4 of the build order**: the OVA in CI, untouched.
@@ -324,7 +328,7 @@ typo and watching `SC2154` stop it.
 ```bash
 rebuild --pull                  # git pull, then nixos-rebuild switch
 rebuild [--force]               # stops at "no changes" unless forced
-ssh-auth                        # unlock the git key into the agent, once per boot
+ssh-auth                        # unlock the signing key into the agent, once per boot
 github-app-login                # authorise the GitHub App, once (docs/GITHUB-APP.md)
 
 codespace up <url|path|name>    # create/start a codespace and its editor

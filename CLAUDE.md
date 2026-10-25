@@ -343,7 +343,12 @@ proven, so the precondition is met.
   the API only. *Amended after Phase 3, below*: with `GITHUB_AUTH=app`, now the
   default, the key never enters a container — it signs on the VM, and
   containers authenticate with GitHub App tokens scoped to their repository.
-  The VM itself still authenticates with the key until phase 5.
+  *Amended again by phase 5*: the VM authenticates with the app too — git
+  over https and `gh` on the account-wide token from the same broker — and
+  uses the key only to sign. The key stays registered on GitHub as an
+  authentication key while the Windows host's Git Bash logs in with it; once
+  Windows has its own, this one becomes signing-only, and a leak of it can
+  push nowhere.
 
 ### Work after Phase 3 — on the VM, from the dev-vm codespace
 
