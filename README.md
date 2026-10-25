@@ -367,17 +367,22 @@ APT_MIRROR=http://mirror.rise.ph/ubuntu
 
 `codespace up` rewrites `archive.ubuntu.com` and `security.ubuntu.com` (and
 regional variants like `azure.archive.ubuntu.com`) to that host, in both the
-deb822 `.sources` layout Ubuntu 24.04 uses and the older `.list` one, then runs
-`apt-get update` once — apt caches package lists per URL, so without that the
-next `apt install` just fails.
+deb822 `.sources` layout Ubuntu 24.04 uses and the older `.list` one.
+
+It does not run `apt-get update`: run it yourself before the first `apt
+install`, as in any container. Devcontainers base images ship with their
+package lists emptied, so that step is needed with or without a mirror, and
+doing it for you cost about 10 s of every create. It cannot run in the
+background either — apt fails on the lists lock rather than waiting for it, so
+your own `apt-get update` in the first seconds would error out.
 
 It only fires when the sources still point at Ubuntu's own hosts, so a repeat
-`up` costs nothing. Unset it and nothing is touched.
+`up` leaves them alone. Unset it and nothing is touched.
 
-> **It cannot speed up devcontainer features.** Those apt-install during the
-> image *build*, before any container exists for this to run in. It speeds up
-> everything after: your own installs, `postCreateCommand`, anything in a
-> terminal.
+> **It speeds up only what runs after `up`:** your own installs, anything in a
+> terminal. Devcontainer features apt-install during the image *build*, and
+> `postCreateCommand` and the dotfiles' `install.sh` run inside `devcontainer
+> up`, all before the sources are rewritten.
 
 Make sure the mirror carries `-security` as well as the release and `-updates`,
 or you will silently stop getting security updates. `mirror.rise.ph` does.

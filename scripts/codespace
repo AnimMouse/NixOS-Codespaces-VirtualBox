@@ -997,8 +997,8 @@ collect_secrets() {
 apply_apt_mirror() {
   local cid="$1" mirror="${2%/}/"
 
-  # Nothing to do if the sources already point somewhere else — which also makes
-  # a repeat `up` free rather than re-running apt-get update every time.
+  # Nothing to do if the sources already point somewhere else, so a repeat `up`
+  # leaves them alone.
   docker exec "$cid" sh -c \
     'grep -rqE "https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null' \
     2>/dev/null || return 0
@@ -1013,10 +1013,13 @@ apply_apt_mirror() {
     sed -i -E "s#https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu/?#${mirror}#g" $files
   ' _ "$mirror" 2>/dev/null || { note "note: could not rewrite apt sources"; return 0; }
 
-  # apt caches package lists per URL, so they are stale the moment the URL
-  # changes; without this the next `apt install` just fails.
-  docker exec -u root "$cid" sh -c 'apt-get update -qq' >/dev/null 2>&1 \
-    || note "note: apt-get update against $mirror failed — run it yourself to see why"
+  # No apt-get update here. It cost ~10 s of every create, and bought nothing
+  # a stock container has: devcontainers base images empty /var/lib/apt/lists
+  # when they are built, so a fresh container needs `apt-get update` before its
+  # first install whether or not the sources were rewritten. In the background
+  # it would race the user instead: apt fails at once on the lists lock rather
+  # than waiting — DPkg::Lock::Timeout does not cover that lock (tested, apt
+  # 3.2) — so an `apt-get update` in the first seconds would error out.
 }
 
 # The docker-in-docker feature points iptables at iptables-legacy on every

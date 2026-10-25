@@ -251,7 +251,7 @@ typo and watching `SC2154` stop it.
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
-| `APT_MIRROR` | — | rewrite apt sources in containers |
+| `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |
 | `CODE_SERVER_VERSION` | `latest` | pin the editor, e.g. `4.138.0`; a leading `v` is fine. Takes effect on `codespace rebuild` |
 | `VM_CONTROL` | the flake's codespace | names that get the VM control socket (below); empty for none. Takes effect on `codespace rebuild` |
@@ -328,8 +328,10 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
 - **`/workspaces` is not `/persist`.** Only `/workspaces/<name>` and
   `/workspaces/refs` are mounts. Anything else there, and all of `$HOME`, dies
   with the container. `rebuild` and `rm` warn before discarding.
-- **`APT_MIRROR` cannot speed up devcontainer features** — they apt-install
-  during the image build, before any container exists to rewrite sources in.
+- **`APT_MIRROR` cannot speed up devcontainer features, `postCreateCommand`
+  or the dotfiles' `install.sh`** — features apt-install during the image
+  build, and the other two run inside `devcontainer up`, all before the
+  launcher rewrites the sources.
 - **The container dotfiles are optional here** and load-bearing in real
   Codespaces. Do not fold them into this repo; that portability is the point.
 - **`git config --global` does not work on the VM.** home-manager owns
