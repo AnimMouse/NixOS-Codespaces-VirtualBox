@@ -32,7 +32,7 @@ let
   # The container-side clients, all plain #!/bin/sh: they run inside each
   # codespace's own image, where a /nix/store shebang means nothing. Still
   # shellchecked, as POSIX sh. Copied into ${dir} below, so a VM rebuild
-  # updates them in every container at once.
+  # updates them in every container at once (codespace-auth-clients).
   shClient = name: pkgs.writeTextFile {
     inherit name;
     executable = true;
@@ -43,6 +43,7 @@ let
   # Phase 3, GITHUB_AUTH=app: git's credential helper, and the gh shim.
   git-credential-codespace = shClient "git-credential-codespace";
   gh-codespace = shClient "gh-codespace";
+  clients = [ git-sign-codespace git-credential-codespace gh-codespace ];
 in
 {
   # Credentials for codespaces that never hand them the key. docs/GITHUB-APP.md
@@ -161,13 +162,29 @@ in
     };
   };
 
-  # Root-owned, so a container that has it mounted can use the socket but not
-  # replace the client every other container runs.
+  # The container-side clients, copied into ${dir} so every container sees the
+  # current ones. Not tmpfiles `C+`, which this used to be: a switch does not
+  # re-run it, so a rebuild left every container on the old clients until the
+  # next boot — observed after phase 4, with the new broker answering the old
+  # helper. A oneshot whose ExecStart names the store paths changes whenever a
+  # client does, so the switch restarts it. Each file is replaced by rename,
+  # never rewritten in place, so a container mid-push never runs half a file.
+  # Root-owned, so a container that has the directory mounted can use the
+  # sockets but not replace the client every other container runs.
+  systemd.services.codespace-auth-clients = {
+    description = "Install the codespace credential clients";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-tmpfiles-setup.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = map (c: "${pkgs.coreutils}/bin/install -D -m 0555 -o root -g root ${c} ${dir}/.${c.name}.new") clients
+        ++ map (c: "${pkgs.coreutils}/bin/mv -f ${dir}/.${c.name}.new ${dir}/${c.name}") clients;
+    };
+  };
+
   systemd.tmpfiles.rules = [
     "d  ${dir}                    0755 root root -"
-    "C+ ${dir}/git-sign-codespace -    -    -    - ${git-sign-codespace}"
-    "C+ ${dir}/git-credential-codespace - - - - ${git-credential-codespace}"
-    "C+ ${dir}/gh-codespace       -    -    -    - ${gh-codespace}"
     "d  ${stateDir}               0700 dev  users -"
     "d  ${stateDir}/entitlements  0700 dev  users -"
   ];
