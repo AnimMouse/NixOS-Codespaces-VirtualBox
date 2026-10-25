@@ -243,7 +243,7 @@ typo and watching `SC2154` stop it.
 |---|---|---|
 | `DOTFILES_REPOSITORY` | — | passed to `devcontainer up` |
 | `DOTFILES_INSTALL_COMMAND` | — | usually `install.sh` |
-| `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for repos with no devcontainer.json |
+| `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `CONTAINER_GH_TOKEN` | `1` | inject the VM's `gh` token |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
@@ -263,6 +263,7 @@ rebuild [--force]               # stops at "no changes" unless forced
 ssh-auth                        # unlock the git key into the agent, once per boot
 
 codespace up <url|path|name>    # create/start a codespace and its editor
+  [--config repo|template|plain|auto|<path>]   # which devcontainer.json; also on new, rebuild
 codespace new <name>            # the same, on an empty workspace
 codespace shell <name>          # a terminal inside it, in a tmux on the VM
 codespace rebuild <name>        # recreate the container, keep the port

@@ -129,6 +129,7 @@ modules/
 ├── vm-control.nix             # read-only control socket for the flake's codespace
 └── home.nix                   # home-manager wiring + git identity units
 home/dev.nix                   # home-manager: VM-layer dotfiles
+templates/devcontainer.json    # default config for `codespace up --config template`
 scripts/
 ├── codespace                  # launcher: up / new / rebuild / down / rm / list / logs
 ├── rebuild                    # rebuild [--pull] [--force]
@@ -260,7 +261,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **`devcontainer up` has no `--publish`** and `appPort` only exists in the project's own config | The editor listens on a unix socket in `/run/editors/<port>/`, bind-mounted into the container at `/mnt/editor`; one static nginx config picks the directory by `$server_port`. No per-codespace proxy unit, so nothing to start, restart or rate-limit |
 | **No third-party code-server feature resolves on ghcr** (`devcontainers-extra`, `-contrib`, `-community`, `itsmechlark` all return no manifest) | Install it after every `up` with the official script, `--method standalone`. Only `devcontainers/*` features are dependable |
 | **`code-server` with no path argument** opens no folder: empty tree, terminals in `$HOME` | Pass `remoteWorkspaceFolder` from `devcontainer up`'s stdout JSON |
-| **The CLI refuses to guess a `devcontainer.json`** and most repos have none | Generate one into `/persist/codespace/<name>/` and pass `--override-config`. Never write into the checkout |
+| **The CLI refuses to guess a `devcontainer.json`** and most repos have none | Generate one into `/persist/codespace/<name>/` and pass `--override-config` — from `templates/devcontainer.json` by default, or `--config plain`/a path. `--override-config` also replaces a repo's own config, which is what makes `--config` work for any repo. Never write into the checkout |
 | **`--override-config` still puts the feature lockfile in the checkout.** The CLI resolves `devcontainer-lock.json` beside the config the repo *would* have, `.devcontainer/`, and (0.87.0) writes one by default whenever features are listed — so a generated config with a feature dies on `ENOENT` before any container exists, or writes into the checkout if the directory happens to exist | `--no-lockfile` alongside `--override-config`, and only there. A repo's own config keeps its lockfile |
 | **`--mount` rejects `readonly`** — it is validated as `type/source/target/external` only | Mount a directory holding only the git key, not `~/.ssh` and not the host keys |
 | **`--remote-env` and `--secrets-file` do not persist.** They apply to that invocation's user commands, not to the container environment — but `--secrets-file` *does* reach them, including the dotfiles `install.sh`, and takes a path so no value lands on a command line | Use both: `--secrets-file` for create time, and a `0600` `~/.codespace-secrets` sourced from `/etc/profile.d` for every shell after. The editor inherits it by being started from a login shell, so nothing needs `docker exec -e` |

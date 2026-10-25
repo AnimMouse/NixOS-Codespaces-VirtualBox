@@ -3,10 +3,14 @@
 let
   codespace = pkgs.writeShellApplication {
     name = "codespace";
-    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused ];
+    runtimeInputs = with pkgs; [ docker devcontainer git gh openssh tmux curl jq coreutils gnused diffutils ];
     # The flake's checkout, so the launcher can tell which codespace is the
-    # one editing this machine — the default for VM_CONTROL.
-    text = builtins.replaceStrings [ "@FLAKE_DIR@" ] [ (import ../paths.nix).flakeDir ]
+    # one editing this machine — the default for VM_CONTROL. And the default
+    # devcontainer.json, from the store, so the template is versioned with the
+    # launcher that copies it.
+    text = builtins.replaceStrings
+      [ "@FLAKE_DIR@" "@TEMPLATE@" ]
+      [ (import ../paths.nix).flakeDir "${../templates/devcontainer.json}" ]
       (builtins.readFile ../scripts/codespace);
   };
 in

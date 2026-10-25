@@ -36,6 +36,10 @@ VM_CONTROL_DIR=/run/vm-control
 CONTAINER_VM=/mnt/vm
 # This VM's own flake checkout: its codespace gets the control socket by default.
 FLAKE_DIR=@FLAKE_DIR@
+# The default devcontainer.json for `--config template` (templates/ in the flake).
+TEMPLATE=@TEMPLATE@
+# Set from `--config` by the dispatcher at the bottom; read by choose_config.
+CONFIG_CHOICE=""
 # One directory per editor port, holding that editor's unix socket — nginx
 # (modules/editor-proxy.nix) picks it by the port a request came in on, after
 # checking the client certificate. Mounted into the container at
@@ -61,6 +65,8 @@ usage:
   codespace up <url|path|name>   create/start a dev container and its editor
   codespace new <name>           the same, on an empty workspace — no repo
   codespace rebuild <name|path>  recreate it from scratch, keeping the port
+      up, new and rebuild take --config repo|template|plain|auto|<path>:
+      which devcontainer.json to use. Sticks to the codespace once given
   codespace shell <name>         a terminal inside it, in a tmux on the VM
   codespace down <name>          stop it, keeping the container
   codespace rm <name> [opts]     delete it; --repo drops the checkout, --volume its volumes
@@ -186,6 +192,88 @@ vm_control_for() {
   return 1
 }
 
+# Which devcontainer.json a codespace uses. Echoes the path to pass as
+# --override-config, or nothing for the repo's own config. Progress on stderr.
+#
+#   repo      the repo's .devcontainer/devcontainer.json or .devcontainer.json
+#   template  $TEMPLATE, this flake's default — Claude Code, gh, node
+#   plain     just DEFAULT_IMAGE, nothing else
+#   <path>    any devcontainer.json, e.g. /persist/refs/devcontainer.json
+#   auto      forget an earlier choice
+#
+# --config overrides even a repo's own config: --override-config replaces it
+# wholesale. An explicit choice is recorded and sticks to the codespace, and
+# rewrites the generated file every time it is given, so `--config template`
+# also picks up a newer template. With no choice on record:
+# the repo's own config if it has one, else a generated file already there
+# (a codespace from before choices existed keeps what it had), else the template.
+#
+# Generated files live in the codespace's state directory, never the checkout:
+# nothing is added to a repo you may not own, and the copy is yours to edit —
+# add features, change the image, then `codespace rebuild`.
+choose_config() {
+  local name=$1 ws=$2 choice=$CONFIG_CHOICE explicit=1 repo_cfg="" src=""
+  local override="$STATE/$1/devcontainer.json" record="$STATE/$1/config_source"
+
+  if [ -f "$ws/.devcontainer/devcontainer.json" ]; then repo_cfg="$ws/.devcontainer/devcontainer.json"
+  elif [ -f "$ws/.devcontainer.json" ]; then repo_cfg="$ws/.devcontainer.json"
+  fi
+
+  if [ "$choice" = auto ]; then
+    rm -f "$record"
+    choice=""
+  fi
+  if [ -z "$choice" ]; then
+    explicit=0
+    choice=$(cat "$record" 2>/dev/null || true)
+  fi
+  if [ -z "$choice" ]; then
+    if [ -n "$repo_cfg" ]; then return 0; fi
+    if [ -f "$override" ]; then echo "$override"; return 0; fi
+    choice=template
+  fi
+
+  case "$choice" in
+    repo)
+      [ -n "$repo_cfg" ] || die "--config repo, but $ws has no devcontainer.json — try --config template or plain"
+      [ "$explicit" = 1 ] && echo repo > "$record"
+      note "using the repo's own $repo_cfg"
+      return 0
+      ;;
+    template|plain|*/*|*.json) ;;
+    *) die "--config takes repo, template, plain, auto, or a path to a devcontainer.json (got '$choice')" ;;
+  esac
+
+  # Rewritten when chosen explicitly; otherwise only made if missing, so edits
+  # to the generated file survive every plain `up` and `rebuild`.
+  if [ "$explicit" = 1 ] || [ ! -f "$override" ]; then
+    # A path is resolved only here, when it is copied: the copy is what `up`
+    # uses after that, so moving the source must not stop the codespace.
+    case "$choice" in
+      template|plain) ;;
+      *) src=$(realpath -e "$choice" 2>/dev/null) || die "--config $choice: no such file"
+         choice=$src ;;
+    esac
+    local new
+    new=$(mktemp)
+    case "$choice" in
+      template) sed "s|@CODESPACE_NAME@|$name|" "$TEMPLATE" > "$new" ;;
+      plain)    printf '{\n  "name": "%s",\n  "image": "%s"\n}\n' \
+                  "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu26.04}" > "$new" ;;
+      *)        cp "$choice" "$new" ;;
+    esac
+    if [ -f "$override" ] && ! cmp -s "$new" "$override"; then
+      mv "$override" "$override.bak"
+      note "kept the previous $override as $override.bak"
+    fi
+    mv "$new" "$override"
+    note "devcontainer.json from $choice: $override"
+  fi
+  [ "$explicit" = 1 ] && echo "$choice" > "$record"
+  [ -n "$repo_cfg" ] && note "ignoring the repo's own $repo_cfg for this codespace (--config repo to use it)"
+  echo "$override"
+}
+
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
 container_any() { docker ps -aq --filter "label=codespace=$1" | head -1; }
 
@@ -265,28 +353,9 @@ cmd_up() {
     warn_ephemeral "$name"
   fi
 
-  # Most repos have no devcontainer.json, and the CLI refuses to guess one.
-  # --override-config is its documented answer ("required when there is no
-  # devcontainer.json otherwise"). The generated config lives in the codespace's
-  # state directory rather than in the repo: nothing is added to a checkout you
-  # may not own, and the file is yours to edit — add features, change the image,
-  # then `codespace rebuild`.
-  #
-  # It is only used while the repo has no config of its own. Commit a real
-  # .devcontainer/devcontainer.json and it takes over on the next rebuild.
-  #
-  # The image is pinned to a release, as nixpkgs is in flake.lock. The bare
-  # `base:ubuntu` tag follows the newest Ubuntu, and moving to 26.04 under us
-  # was enough to break docker-in-docker's default install. `ubuntu26.04` has
-  # no hyphen: `ubuntu-26.04` is a 404, although `ubuntu-24.04` exists. Only
-  # new codespaces see a change here — an existing generated file is kept.
-  if [ ! -f "$ws/.devcontainer/devcontainer.json" ] && [ ! -f "$ws/.devcontainer.json" ]; then
-    local override="$STATE/$name/devcontainer.json"
-    if [ ! -f "$override" ]; then
-      note "no devcontainer.json in the repo — writing a default to $override"
-      printf '{\n  "name": "%s",\n  "image": "%s"\n}\n' \
-        "$name" "${DEFAULT_IMAGE:-mcr.microsoft.com/devcontainers/base:ubuntu26.04}" > "$override"
-    fi
+  local override
+  override=$(choose_config "$name" "$ws") || exit 1
+  if [ -n "$override" ]; then
     # --no-lockfile because the CLI places a feature lockfile beside the config
     # it *would* have read — the checkout's .devcontainer/, not this override —
     # and writes one by default whenever features are listed. With no
@@ -1429,6 +1498,23 @@ cmd_logs() {
 
 [ $# -ge 1 ] || usage 0
 sub="$1"; shift
+
+# --config for the commands that create containers, taken out here so that
+# cmd_up's positional arguments stay as they were.
+case "$sub" in
+  up|new|blank|rebuild)
+    rest=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --config) [ $# -ge 2 ] || die "--config needs a value: repo, template, plain, auto, or a path"
+                  CONFIG_CHOICE=$2; shift 2 ;;
+        --config=*) CONFIG_CHOICE=${1#--config=}; shift ;;
+        *) rest+=("$1"); shift ;;
+      esac
+    done
+    set -- ${rest[@]+"${rest[@]}"}
+    ;;
+esac
 case "$sub" in
   up)    cmd_up "$@" ;;
   new|blank) cmd_new "$@" ;;

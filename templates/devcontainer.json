@@ -1,0 +1,55 @@
+{
+  // The launcher's default for a repo with no devcontainer.json of its own:
+  // `codespace up <repo> --config template`, or just `codespace up` on such a
+  // repo. Copied into /persist/codespace/<name>/devcontainer.json on create —
+  // that copy is yours to edit, then `codespace rebuild <name>`.
+  // `--config template` again replaces it with the current version of this file.
+  //
+  // Everything here is plain Dev Container spec, so the copy also works as a
+  // repo's own .devcontainer/devcontainer.json in a real Codespace.
+  "name": "@CODESPACE_NAME@",
+
+  // Pinned, as nixpkgs is in flake.lock. The bare `:ubuntu` tag moved to 26.04
+  // under us once. No hyphen: `ubuntu-26.04` is a 404.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu26.04",
+
+  // A real init as PID 1, so the processes an editor and its terminals leave
+  // behind are reaped instead of piling up as zombies over a long session.
+  "init": true,
+
+  "features": {
+    // gh, for the GH_TOKEN the launcher injects from the VM.
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+
+    // Listed explicitly: claude-code only declares `installsAfter` on it, and
+    // without it falls back to installing Node 18 from NodeSource itself.
+    "ghcr.io/devcontainers/features/node:1": {},
+
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+
+  // Claude Code's state — login, settings, sessions, memory — on a volume, so
+  // a rebuild keeps it. ${devcontainerId} because Docker's volume namespace is
+  // flat and global: a fixed name would be one shared directory for every
+  // codespace made from this template.
+  "mounts": [
+    "source=claude-${devcontainerId},target=/home/vscode/.claude,type=volume"
+  ],
+
+  // Claude Code keeps one file outside ~/.claude — ~/.claude.json, its global
+  // config — which a rebuild would lose. With CLAUDE_CONFIG_DIR set it lives
+  // inside that directory instead, on the volume. containerEnv, not
+  // remoteEnv: the launcher starts the editor with `docker exec`.
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+  },
+
+  // Both chowns are required, in this order:
+  //  - Docker creates the volume's mount point root-owned, since the path is
+  //    not in the image; without the first, Claude Code cannot write its own
+  //    directory.
+  //  - Features install as root, so Claude Code's npm package lands root-owned
+  //    and its self-update fails with "no write permission to npm prefix".
+  //    `npm prefix -g` because the path embeds the Node version.
+  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude && sudo chown -R $(id -u):$(id -g) \"$(npm prefix -g)/lib/node_modules/@anthropic-ai\""
+}

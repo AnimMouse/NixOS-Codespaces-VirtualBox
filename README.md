@@ -242,6 +242,7 @@ in the profile holding the certificate (setup step 5).
 | `codespace up <url\|path\|name>` | Create or start it, and its editor |
 | `codespace shell <name>` | A terminal inside it, from your SSH session |
 | `codespace new <name>` | The same, on an empty workspace — no repo to clone |
+| `--config repo\|template\|plain\|<path>` | On `up`, `new` and `rebuild`: which devcontainer.json — see [Choosing the devcontainer.json](#choosing-the-devcontainerjson) |
 | `codespace rebuild <name>` | Recreate the container from scratch, same port |
 | `codespace down <name>` | Stop it. Fast to restart, keeps installed packages |
 | `codespace rm <name>` | Delete the container and its port. **Keeps the checkout** |
@@ -750,26 +751,44 @@ with no install script gets auto-linked instead — but only where the base imag
 has no file of that name, so an image shipping its own `.gitconfig` silently
 wins and your config just never applies.
 
-## Repos without a devcontainer.json
+## Choosing the devcontainer.json
 
-Most repos have none, and the CLI refuses to guess. The launcher writes a
-default to `/persist/codespace/<name>/devcontainer.json` and passes it as
-`--override-config`. Nothing is added to your checkout; edit that file and
-`codespace rebuild`.
+`up`, `new` and `rebuild` take `--config`:
 
-The default image is pinned to `mcr.microsoft.com/devcontainers/base:ubuntu26.04`
-rather than the bare `:ubuntu` tag, which follows the newest Ubuntu. Change it
-for new codespaces in `/persist/codespace/config`:
+| `--config` | Uses |
+|---|---|
+| `repo` | the repo's own `.devcontainer/devcontainer.json` (or `.devcontainer.json`) |
+| `template` | [`templates/devcontainer.json`](templates/devcontainer.json) — Ubuntu 26.04, gh, Node, Claude Code with its state on a volume |
+| `plain` | the base image and nothing else |
+| a path | any devcontainer.json, e.g. `/persist/refs/devcontainer.json` |
+| `auto` | forget an earlier choice |
+
+```bash
+codespace up github.com/USER/project                    # its own config, or the template if it has none
+codespace up project --config plain                     # just the image
+codespace rebuild project --config /persist/refs/devcontainer.json
+```
+
+With no `--config`, a repo with its own config uses it, and one without gets
+the template. A choice you make sticks to that codespace until you change it or
+pass `--config auto`, and it wins even over a repo's own config — useful for a
+repo whose config is meant for somewhere else.
+
+Anything but `repo` is copied to `/persist/codespace/<name>/devcontainer.json`
+and passed as `--override-config`, so nothing is added to your checkout. That
+copy is yours: edit it and `codespace rebuild`, and plain `up`s and `rebuild`s
+leave it alone. Giving `--config` again rewrites it — `--config template` is
+how a codespace picks up a newer template — keeping the old one as `.bak`.
+
+Codespaces made before `--config` existed keep the file they had.
+
+`plain` uses `mcr.microsoft.com/devcontainers/base:ubuntu26.04`, pinned rather
+than the bare `:ubuntu` tag, which follows the newest Ubuntu. Change it in
+`/persist/codespace/config`:
 
 ```bash
 DEFAULT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 ```
-
-A codespace that already has a generated config keeps its image; edit
-`/persist/codespace/<name>/devcontainer.json` and `codespace rebuild` to move it.
-
-It is used **only while the repo has no config of its own**. Commit a real
-`.devcontainer/devcontainer.json` and it takes over on the next rebuild.
 
 ## What lives where
 
@@ -836,6 +855,7 @@ scripts/editor-tls              make the CA and certificates, once
 scripts/vm-control              VM side of the control socket
 scripts/vm                      container side: `vm status`, `vm build`, …
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
+templates/devcontainer.json     the default config for `--config template`
 docs/BOOTSTRAP.md               full install walkthrough
 docs/GITHUB-APP.md              plan: scoped GitHub credentials per codespace
 docs/EDITOR-MTLS.md             editor access by client certificate: design and tests
