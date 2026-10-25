@@ -1,8 +1,9 @@
 # HANDOFF — moving development onto the VM
 
 This repo was built and verified from a **GitHub Codespace**, not from the VM it
-describes. Everything through Phase 3 is done; Phase 4 is untouched.
-This file is what you need to carry on from inside the VM itself.
+describes. Everything through Phase 3 is done; Phase 4 is untouched. Since the
+move, work continues from the dev-vm codespace on the VM itself — see "Built
+since the move" below. This file is what you need to carry on.
 
 Read `CLAUDE.md` for the design and the gotcha list — it is the authority and is
 current. This file only covers what *changes* when the workbench moves.
@@ -18,11 +19,39 @@ current. This file only covers what *changes* when the workbench moves.
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
-| Planned, not built | Scoped GitHub credentials per codespace — [docs/GITHUB-APP.md](docs/GITHUB-APP.md). Today every container can act as the whole account |
-| Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). Built and tested in a container; the VM and Firefox checks are its §5 |
+| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity) and 5 (the VM itself on the app) are planned |
+| Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). In daily use; the remaining Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
 `/persist`, never in git. `paths.nix` records the locations and no values.
+
+### Built since the move
+
+Each item is a module or launcher change with its own commit and a CLAUDE.md §8
+row where something was learnt the hard way.
+
+| What | Where | In short |
+|---|---|---|
+| VM control socket | `modules/vm-control.nix`, `scripts/vm{,-control}` | `vm status`, `vm build`, journals — read-only, for the flake's codespace |
+| Editor access by client certificate | `modules/editor-proxy.nix`, `scripts/editor-tls` | nginx + mTLS + Fetch Metadata; editors on unix sockets with no password |
+| `--config repo\|template\|plain\|<path>` | launcher, `templates/devcontainer.json` | which devcontainer.json; the template carries gh, Node, Claude Code on a volume |
+| Shared code-server | launcher | unpacked once per version, immutable, mounted at `/mnt/code-server` |
+| Dotfiles from the VM | launcher | `DOTFILES_REPOSITORY=/persist/dotfiles`, snapshotted per codespace |
+| Faster creates | launcher | no `apt-get update` for `APT_MIRROR`; a plain create went from ~21 s to ~7 s |
+| Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
+| GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
+| `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
+| Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only |
+
+### Next
+
+- **Phase 4 of the GitHub App plan**: `customizations.codespaces.repositories`,
+  read-only tokens where you cannot write, revocation on `codespace rm`, `app`
+  as the default, and CLAUDE.md §8/§9 amended away from agent forwarding.
+- **Phase 5**: the VM itself on the app; the SSH key becomes signing-only.
+- **The kiosk launcher** has never launched Firefox. Its profile check runs
+  `firefox -P`, which may open Firefox's profile manager instead.
+- **Phase 4 of the build order**: the OVA in CI, untouched.
 
 ---
 
@@ -133,8 +162,7 @@ If you touch any of these, you can now test them properly rather than by proxy.
   containers get `400` from every editor port and hold no editor credential.
   What is left to check — a fresh profile refused, webviews, cross-site pages,
   name constraints in Firefox — is [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md)
-  §5. Each remaining codespace needs one `codespace rebuild` for its socket
-  mount.
+  §5. Every codespace has been rebuilt onto it.
 
 ### Test scaffolding you no longer need
 

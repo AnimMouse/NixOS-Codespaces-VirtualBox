@@ -1,13 +1,15 @@
-# Scoped GitHub credentials — phase 1 built, the rest planned
+# Scoped GitHub credentials — phases 1–3 built and verified, 4–5 planned
 
 Give each codespace a GitHub credential that reaches **only its own
 repository**, the way a real Codespace's `GITHUB_TOKEN` does, using a personal
 GitHub App that mints a scoped token per codespace — and sign its commits on
 the VM, so no key that can authenticate ever reaches a container.
 
-Phase 1, signing on the VM, is built: `modules/codespace-auth.nix`,
-`scripts/git-sign-service`, `scripts/git-sign-codespace`, and `GIT_SIGNING` in
-the launcher. The rest is not. Facts marked *checked* were read from GitHub's
+Built and verified on the VM: phase 1, signing on the VM
+(`modules/codespace-auth.nix`, `scripts/git-sign-*`, `GIT_SIGNING`); phase 2,
+the app, `github-app-login` and the token broker; phase 3, `GITHUB_AUTH=app` —
+no SSH credential in containers, git and gh on scoped tokens, in use in every
+codespace. Phases 4 (parity) and 5 (the VM itself on the app) are planned. Facts marked *checked* were read from GitHub's
 documentation, from source, or observed; facts marked **verify** must be
 confirmed before or during the build, and the design bends if they turn out
 false.

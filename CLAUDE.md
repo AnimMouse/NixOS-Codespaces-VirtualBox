@@ -121,7 +121,7 @@ hosts/dev/
 paths.nix                      # where identity/key material live — paths, no values
 modules/
 ├── persist.nix                # /persist wiring, host key persistence
-├── tools.nix                  # the `rebuild` and `ssh-auth` commands
+├── tools.nix                  # the `rebuild`, `ssh-auth` and `github-app-login` commands
 ├── docker.nix                 # Docker + devcontainer CLI
 ├── code-server.nix            # hub editor, on a unix socket
 ├── codespace.nix              # launcher package + retention timer
@@ -146,7 +146,7 @@ scripts/
 ├── gh-codespace               # container side: gh with a fresh scoped token per run
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
-docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials
+docs/GITHUB-APP.md             # scoped GitHub credentials: phases 1–3 built, 4–5 planned
 docs/EDITOR-MTLS.md            # editor access by client certificate: design and tests
 .github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
 ```
@@ -273,7 +273,7 @@ Expect 20–40 minutes for step 5, almost entirely downloads.
 | **Features look slow, but only once.** The first build of the template took about a minute — `node` alone 23 s, `claude-code` 13 s, exporting the image 18 s — which reads as an argument for installing in `postCreateCommand` instead. Measured, it is not: BuildKit caches feature steps across codespaces, not just within one, so a *different* codespace on the same template built in 0.2 s, and created in 33 s against 30 s for `plain`. A `postCreateCommand` install is never cached and is paid on every create and rebuild | Keep tools that every codespace needs as features. The weekly prune keeps tagged images and only drops build cache older than 7 days, so the worst case is one more one-minute build |
 | **`--mount` rejects `readonly`** — it is validated as `type/source/target/external` only | Mount a directory holding only the git key, not `~/.ssh` and not the host keys |
 | **`--remote-env` and `--secrets-file` do not persist.** They apply to that invocation's user commands, not to the container environment — but `--secrets-file` *does* reach them, including the dotfiles `install.sh`, and takes a path so no value lands on a command line | Use both: `--secrets-file` for create time, and a `0600` `~/.codespace-secrets` sourced from `/etc/profile.d` for every shell after. The editor inherits it by being started from a login shell, so nothing needs `docker exec -e` |
-| **The dotfiles clone runs inside the container, first**, before any credential this repo sets up exists — a private repo fails and `up` still reports success | Pass `GIT_SSH_COMMAND` and an https→ssh rewrite via `--remote-env`, which *does* reach that clone |
+| **The dotfiles clone runs inside the container, first**, before any credential this repo sets up exists — a private repo fails and `up` still reports success | Pass `GIT_SSH_COMMAND` and an https→ssh rewrite via `--remote-env`, which *does* reach that clone. With `GITHUB_AUTH=app` nothing in the container can authenticate it, so use `DOTFILES_REPOSITORY=/persist/dotfiles` (a local snapshot, below) or a public URL |
 | **A dotfiles repo mounted into containers is a cross-container hole.** `install.sh` runs on every create and mounts cannot be read-only, so one shared, writable copy — the repo itself, or a clone in `/persist/refs` — lets one compromised codespace plant a script every later one runs. A symlink into refs does not help: it is resolved inside the container, where `/persist` does not exist | `DOTFILES_REPOSITORY` may be a git repo on the VM (`/persist/dotfiles`): at create the launcher clones its committed HEAD (`git clone --bare --depth 1 file://…`) into `/persist/codespace/<name>/dotfiles.git`, mounts that at `/mnt/dotfiles`, and the CLI clones from there. Each codespace can change only its own snapshot. No network, no credential |
 | **nixpkgs bash has no `compgen`** — built without programmable completion, so it returns 127 and the branch silently reads false. shellcheck does not catch it | Glob into an array and test `[ -e "${arr[0]}" ]` |
 | **`pgrep -f` inside `sh -c` matches itself**, because the pattern is in the shell's own command line. Bracketing the first character is *not* enough: a pattern like `code-server.*--bind-addr` still matches when some other part of the same command line supplies `code-server` (e.g. `/tmp/code-server.args`) and `.*` bridges to the bracketed pattern text | Do not infer "is it running" from a process listing at all. Ask the thing itself — an HTTP probe of the endpoint — which is also the property actually worth knowing |
@@ -336,7 +336,33 @@ proven, so the precondition is met.
   `readonly`; `/persist/ssh` holds root-owned host keys that containers cannot
   read and should not have.
 - **One SSH key does authentication and signing.** No PAT. `gh` is installed for
-  the API only.
+  the API only. *Amended after Phase 3, below*: in `GITHUB_AUTH=app` the key
+  never enters a container — it signs on the VM, and containers authenticate
+  with GitHub App tokens scoped to their repository.
+
+### Work after Phase 3 — on the VM, from the dev-vm codespace
+
+HANDOFF.md "Built since the move" maps each piece to its files. The decisions
+that amend the sections above:
+
+- **Editors are behind nginx with a client certificate**, not a password
+  (docs/EDITOR-MTLS.md). Every editor, the hub included, listens on a unix
+  socket; URLs are `https://`. The per-codespace socat proxy units are gone.
+- **Credentials reach containers through `/mnt/github`**, one shared directory
+  of sockets (signing, tokens). Services identify the caller by the kernel —
+  `SO_PEERPIDFD`, then the process's cgroup names its container — never by
+  anything in the request, so no per-codespace units are needed.
+- **`GITHUB_AUTH=app`** (docs/GITHUB-APP.md): no agent and no key in containers.
+  git uses a credential helper and gh a shim, both asking the VM's broker per
+  operation; `GITHUB_TOKEN` is set as in Codespaces and `GH_TOKEN` is left free
+  for a PAT override, which both honour. Organisations must install the app.
+  `legacy` is still the default until phase 4 makes `app` the default.
+- **Shared, read-only-by-immutability state** replaces anything a container
+  could write and every other container would later run: code-server
+  (`chattr +i`), dotfiles (a snapshot per codespace). The CLI cannot mount
+  read-only, so this is the pattern.
+- **`--config`** chooses a codespace's devcontainer.json; the template at
+  `templates/devcontainer.json` is the default for repos without one.
 
 ---
 

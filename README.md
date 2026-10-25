@@ -101,7 +101,14 @@ not keys in this file.
 
 GitHub keeps authentication keys and signing keys in separate lists but accepts
 the same public key in both. So one key pushes, pulls **and** signs — no token to
-rotate, and it is already mounted into every container.
+rotate.
+
+> **Containers can do without the key entirely.** With `GITHUB_AUTH=app` (see
+> [GitHub authentication](#github-authentication) and
+> [docs/GITHUB-APP.md](docs/GITHUB-APP.md)) the key stays on the VM, signs
+> there, and codespaces push with tokens scoped to their own repository. That
+> is the recommended setup once the GitHub App is registered; the agent
+> forwarding described here is the `legacy` default.
 
 ```bash
 ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
