@@ -1,0 +1,301 @@
+"""Hand a codespace a GitHub token scoped to its own repository.
+
+One request per connection on /run/codespace-auth/token.sock, started by
+systemd with the socket as stdin and stdout (modules/codespace-auth.nix).
+docs/GITHUB-APP.md §4.3.
+
+    GET /token   the token, as plain text — what a git credential helper or
+                 a gh shim needs, readable with nothing but curl
+    GET /whoami  which codespace and repositories this caller is entitled to,
+                 and the cached token's expiry; never the token itself
+
+Who is asking is read from the kernel, never from the request: the
+connecting process's pidfd gives its PID, its cgroup names its Docker
+container, and the pidfd is checked again afterwards so a PID reused in
+between cannot be mistaken for the caller. What a container may have is the
+entitlement the launcher wrote for that container ID at `up`. Nothing in a
+request can widen it.
+
+Built by modules/codespace-auth.nix with pkgs.writers.writePython3Bin.
+"""
+
+import base64
+import datetime
+import fcntl
+import json
+import os
+import re
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+APP = "@GITHUB_APP_DIR@"
+STATE = "@STATE_DIR@"
+ENTITLEMENTS = os.path.join(STATE, "entitlements")
+# Python 3.13 has no name for it; the kernel (≥ 6.5) does. Checked on 6.18.
+SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)
+# Refresh or re-scope this long before expiry, so a token handed out is never
+# about to lapse under a push.
+MARGIN = 300
+LOGIN_NEEDED = (
+    "the VM's GitHub App authorisation has lapsed or was revoked.\n"
+    "On the VM, run: github-app-login\n"
+)
+
+
+class Refusal(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def respond(status, body):
+    reason = {200: "OK", 400: "Bad Request", 403: "Forbidden",
+              404: "Not Found", 502: "Bad Gateway",
+              503: "Unavailable"}.get(status, "Error")
+    if isinstance(body, str):
+        body = body.encode()
+    out = sys.stdout.buffer
+    out.write(f"HTTP/1.0 {status} {reason}\r\n".encode())
+    out.write(b"Content-Type: text/plain\r\nCache-Control: no-store\r\n")
+    out.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    out.write(body)
+    out.flush()
+
+
+def pidfd_pid(pidfd):
+    with open(f"/proc/self/fdinfo/{pidfd}") as f:
+        for line in f:
+            if line.startswith("Pid:"):
+                return int(line.split()[1])
+    return -1
+
+
+def caller_container():
+    """The full ID of the Docker container the connecting process is in."""
+    s = socket.socket(fileno=0)
+    try:
+        pidfd = s.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
+    finally:
+        s.detach()
+    try:
+        pid = pidfd_pid(pidfd)
+        if pid <= 0:
+            raise Refusal(403, "the connecting process has already exited\n")
+        with open(f"/proc/{pid}/cgroup") as f:
+            m = re.search(r"docker[-/]([0-9a-f]{64})", f.read())
+        # The pidfd pins the process, not the number: if it has exited since,
+        # the PID read above may now belong to something else.
+        if pidfd_pid(pidfd) != pid:
+            raise Refusal(403, "the connecting process exited mid-request\n")
+    finally:
+        os.close(pidfd)
+    if not m:
+        raise Refusal(403, "not a codespace: the caller is in no container\n")
+    return m.group(1)
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_private(path, text):
+    """Replace a file by rename, after fsync, so it is never half-written —
+    for the refresh token that matters: the old one is dead once GitHub
+    has issued the new."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def read_secret(name):
+    try:
+        with open(os.path.join(APP, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def post(url, fields=None, body=None, auth=None):
+    headers = {"Accept": "application/json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    if fields is not None:
+        data = urllib.parse.urlencode(fields).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    else:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    if auth:
+        cred = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+        headers["Authorization"] = f"Basic {cred}"
+    req = urllib.request.Request(url, data=data, headers=headers,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.load(e)
+        except ValueError:
+            return e.code, {"message": e.reason}
+
+
+def account_token(client_id):
+    """The account-wide user access token, refreshed when near expiry.
+
+    Each refresh rotates the refresh token: the new one is persisted before
+    the access token is used, so a crash in between costs a refresh, never
+    the authorisation.
+    """
+    cache = os.path.join(STATE, "account.json")
+    c = read_json(cache)
+    if c and c.get("expires_at", 0) - time.time() > MARGIN:
+        return c["access_token"], c["expires_at"]
+
+    refresh = read_secret("refresh_token")
+    if not refresh:
+        raise Refusal(503, LOGIN_NEEDED)
+    fields = {"client_id": client_id, "grant_type": "refresh_token",
+              "refresh_token": refresh}
+    # Not needed for device-flow tokens (docs), but harmless when present.
+    secret = read_secret("client_secret")
+    if secret:
+        fields["client_secret"] = secret
+    status, r = post("https://github.com/login/oauth/access_token",
+                     fields=fields)
+    if "access_token" not in r:
+        err = r.get("error", "")
+        log(f"refresh failed: HTTP {status} {err}: {r.get('error_description', '')}")
+        if err in ("bad_refresh_token", "unauthorized_client",
+                   "incorrect_client_credentials"):
+            raise Refusal(503, LOGIN_NEEDED)
+        raise Refusal(502, f"GitHub refused the refresh: {err or status}\n")
+    if r.get("refresh_token"):
+        write_private(os.path.join(APP, "refresh_token"),
+                      r["refresh_token"] + "\n")
+    expires_at = int(time.time()) + int(r.get("expires_in", 28800))
+    write_private(cache, json.dumps({"access_token": r["access_token"],
+                                     "expires_at": expires_at}))
+    log(f"refreshed the account token; it expires {stamp(expires_at)}")
+    return r["access_token"], expires_at
+
+
+def parse_expiry(value, fallback):
+    if not value:
+        return fallback
+    try:
+        return int(datetime.datetime.fromisoformat(
+            value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return fallback
+
+
+def stamp(t):
+    return datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+
+
+def scoped_token(cid, ent):
+    """A token for this container's repositories, cached until near expiry."""
+    cache = os.path.join(STATE, f"{cid}.json")
+    c = read_json(cache)
+    if c and c.get("expires_at", 0) - time.time() > MARGIN:
+        return c["token"], c["expires_at"]
+
+    repos = ent.get("repositories") or {}
+    owners = {r.split("/")[0] for r in repos}
+    if len(owners) != 1:
+        # /token/scoped takes one target. Several owners is phase 4.
+        raise Refusal(400, "repositories under more than one owner are not supported yet\n")
+    owner = owners.pop()
+    perms = {}
+    for p in repos.values():
+        for k, v in p.items():
+            if perms.get(k) != "write":
+                perms[k] = v
+
+    client_id = read_secret("client_id")
+    secret = read_secret("client_secret")
+    if not client_id or not secret:
+        raise Refusal(503, "the GitHub App's client_id or client_secret is missing on the VM\n")
+    access, account_expiry = account_token(client_id)
+    status, r = post(
+        f"https://api.github.com/applications/{client_id}/token/scoped",
+        body={"access_token": access, "target": owner,
+              "repositories": [r.split("/", 1)[1] for r in repos],
+              "permissions": perms},
+        auth=(client_id, secret))
+    if "token" not in r:
+        log(f"scoping failed for {ent.get('codespace')}: HTTP {status} {r.get('message', '')}")
+        raise Refusal(502, f"GitHub refused to scope a token: {r.get('message', status)}\n")
+    expires_at = parse_expiry(r.get("expires_at"), account_expiry)
+    write_private(cache, json.dumps({"token": r["token"],
+                                     "expires_at": expires_at}))
+    log(f"token for {ent.get('codespace')} ({cid[:12]}): "
+        f"{', '.join(sorted(repos))} {perms}, expires {stamp(expires_at)}")
+    return r["token"], expires_at
+
+
+def read_request():
+    line = sys.stdin.buffer.readline(8192).decode("latin-1").split()
+    while True:
+        h = sys.stdin.buffer.readline(8192)
+        if not h or h in (b"\r\n", b"\n"):
+            break
+    return (line[0], line[1]) if len(line) >= 2 else (None, None)
+
+
+def main():
+    method, path = read_request()
+    if method != "GET" or path not in ("/token", "/whoami"):
+        respond(404, "GET /token or GET /whoami\n")
+        return
+    try:
+        cid = caller_container()
+        ent = read_json(os.path.join(ENTITLEMENTS, f"{cid}.json"))
+        if ent is None:
+            raise Refusal(403, "this container has no entitlement — `codespace up` it on the VM\n")
+        if path == "/whoami":
+            c = read_json(os.path.join(STATE, f"{cid}.json")) or {}
+            exp = c.get("expires_at")
+            respond(200, json.dumps({
+                "codespace": ent.get("codespace"),
+                "container": cid[:12],
+                "repositories": ent.get("repositories") or {},
+                "cached_token_expires": stamp(exp) if exp else None,
+            }, indent=2) + "\n")
+            return
+        if not ent.get("repositories"):
+            raise Refusal(404, f"{ent.get('codespace')} has no GitHub repository to scope a token to\n")
+        # One at a time: two refreshes at once would each invalidate the
+        # other's refresh token, and lock the VM out until a new login.
+        with open(os.path.join(STATE, "lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            token, _ = scoped_token(cid, ent)
+        respond(200, token + "\n")
+    except Refusal as r:
+        respond(r.status, r.message)
+
+
+main()

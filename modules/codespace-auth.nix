@@ -12,6 +12,18 @@ let
   # dead inode.
   dir = "/run/codespace-auth";
 
+  # The token broker's own state: cached tokens and the entitlements the
+  # launcher writes per container. In /run, so cached tokens die with a reboot
+  # and nothing scoped outlives the machine being up; the launcher rewrites an
+  # entitlement on every `up`, which is what starts a container anyway.
+  # dev-only, and never mounted into a container.
+  stateDir = "/run/codespace-auth-state";
+
+  github-token-service = pkgs.writers.writePython3Bin "github-token-service"
+    { flakeIgnore = [ "E501" ]; }
+    (builtins.replaceStrings [ "@GITHUB_APP_DIR@" "@STATE_DIR@" ] [ p.githubAppDir stateDir ]
+      (builtins.readFile ../scripts/github-token-service));
+
   git-sign-service = pkgs.writers.writePython3Bin "git-sign-service"
     { flakeIgnore = [ "E501" ]; }
     (builtins.replaceStrings [ "@KEY_FILE@" ] [ p.keyFile ]
@@ -90,10 +102,65 @@ in
     };
   };
 
+  # Phase 2: the token broker (docs/GITHUB-APP.md §4.3). Same shape as
+  # signing — one socket for every codespace, one short handler per request,
+  # the caller identified by the kernel — and the refresh serialised by a lock
+  # instead of by being one long-running process. Refresh tokens rotate on
+  # use, so two refreshes at once would lock the VM out.
+  systemd.sockets.codespace-token = {
+    description = "Scoped GitHub tokens for codespaces";
+    wantedBy = [ "sockets.target" ];
+    listenStreams = [ "${dir}/token.sock" ];
+    socketConfig = {
+      Accept = true;
+      MaxConnections = 16;
+      SocketUser = "dev";
+      SocketGroup = "users";
+      SocketMode = "0600";
+      DirectoryMode = "0755";
+    };
+  };
+
+  systemd.services."codespace-token@" = {
+    description = "Scoped GitHub token request";
+    serviceConfig = {
+      ExecStart = lib.getExe github-token-service;
+      StandardInput = "socket";
+      StandardOutput = "socket";
+      StandardError = "journal";
+
+      # dev, which owns the app's credentials. Writes only where it must: the
+      # rotated refresh token, and its cache.
+      User = "dev";
+      Group = "users";
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      ReadWritePaths = [ p.githubAppDir stateDir ];
+      InaccessiblePaths = map (x: "-${x}") [
+        "/persist/ssh"
+        "/persist/secrets"
+        "/persist/tls"
+        "/persist/git"
+        "/persist/code-server"
+        "/persist/home"
+        "/persist/codespace"
+        "/persist/repos"
+        "/persist/refs"
+        "/persist/docker"
+        "/run/user"
+      ];
+      RuntimeMaxSec = "1min";
+    };
+  };
+
   # Root-owned, so a container that has it mounted can use the socket but not
   # replace the client every other container runs.
   systemd.tmpfiles.rules = [
     "d  ${dir}                    0755 root root -"
     "C+ ${dir}/git-sign-codespace -    -    -    - ${git-sign-codespace}"
+    "d  ${stateDir}               0700 dev  users -"
+    "d  ${stateDir}/entitlements  0700 dev  users -"
   ];
 }

@@ -87,6 +87,11 @@ If you touch any of these, you can now test them properly rather than by proxy.
   the agent hidden was signed by the VM, logged against the container's ID,
   and shows Verified on GitHub. The dotfiles were changed to leave signing
   alone when the VM does it.
+- **The token broker** (phase 2 of [docs/GITHUB-APP.md](docs/GITHUB-APP.md)).
+  From the dev-vm codespace, with nothing but the token able to authenticate:
+  `/whoami` named the codespace and its container, the token is a `ghu_`
+  acting as the account, a dry-run push to its own repo over https was
+  accepted, and another private repo was refused with 403. It lives 8 hours.
 - **Dotfiles from `/persist/dotfiles`.** A new codespace cloned its own
   snapshot (`origin` is `/mnt/dotfiles`, at the VM repo's committed HEAD) and
   ran `install.sh`; the whole dotfiles step took 67 ms against 3.5 s from

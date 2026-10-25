@@ -902,6 +902,8 @@ scripts/vm-control              VM side of the control socket
 scripts/vm                      container side: `vm status`, `vm build`, …
 scripts/git-sign-service        VM side of commit signing
 scripts/git-sign-codespace      container side: git's signing program
+scripts/github-app-login        authorise the GitHub App once
+scripts/github-token-service    hands a codespace a token scoped to its repository
 scripts/codespace-kiosk.ps1     Windows Firefox kiosk launcher
 templates/devcontainer.json     the default config for `--config template`
 docs/BOOTSTRAP.md               full install walkthrough

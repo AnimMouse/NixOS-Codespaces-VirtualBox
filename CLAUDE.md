@@ -127,7 +127,7 @@ modules/
 ├── codespace.nix              # launcher package + retention timer
 ├── editor-proxy.nix           # nginx + client certificates in front of every editor
 ├── vm-control.nix             # read-only control socket for the flake's codespace
-├── codespace-auth.nix         # credential services for codespaces: commit signing on the VM
+├── codespace-auth.nix         # credential services for codespaces: signing, scoped GitHub tokens
 └── home.nix                   # home-manager wiring + git identity units
 home/dev.nix                   # home-manager: VM-layer dotfiles
 templates/devcontainer.json    # default config for `codespace up --config template`
@@ -140,6 +140,8 @@ scripts/
 ├── vm                         # container side: plain sh + curl
 ├── git-sign-service           # VM side of commit signing (Python), one signature per request
 ├── git-sign-codespace         # container side: git's gpg.ssh.program, plain sh + curl
+├── github-app-login           # authorise the GitHub App once, by device flow
+├── github-token-service       # token broker: a token scoped to the caller's repository
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
 docs/GITHUB-APP.md             # PLAN ONLY — per-codespace scoped GitHub credentials

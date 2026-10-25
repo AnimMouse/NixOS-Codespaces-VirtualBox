@@ -36,6 +36,10 @@ CONTAINER_CS=/mnt/code-server
 # now, scoped GitHub tokens later. One directory for every codespace.
 AUTH_DIR=/run/codespace-auth
 CONTAINER_AUTH=/mnt/github
+# What each container may ask the token broker for, keyed by container ID
+# (modules/codespace-auth.nix). Written at every `up`; in /run, like the
+# tokens it governs.
+ENTITLEMENTS=/run/codespace-auth-state/entitlements
 # Where a codespace's own snapshot of the dotfiles appears, when
 # DOTFILES_REPOSITORY is a repository on the VM. See snapshot_dotfiles.
 CONTAINER_DOTFILES=/mnt/dotfiles
@@ -394,6 +398,54 @@ snapshot_dotfiles() {
   rm -rf "$snap"
   mv "$snap.new" "$snap"
   echo "$snap"
+}
+
+# The GitHub repository a checkout's origin names, as owner/repo, or nothing.
+github_repo() {
+  local url repo=""
+  url=$(git -C "$1" remote get-url origin 2>/dev/null || true)
+  case "$url" in
+    https://github.com/*)   repo=${url#https://github.com/} ;;
+    git@github.com:*)       repo=${url#git@github.com:} ;;
+    ssh://git@github.com/*) repo=${url#ssh://git@github.com/} ;;
+  esac
+  repo=${repo%/}
+  repo=${repo%.git}
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && echo "$repo"
+  return 0
+}
+
+# Drops every entitlement for codespace $1 except container $2's, if given —
+# those of containers it no longer has.
+drop_entitlements() {
+  local f
+  [ -d "$ENTITLEMENTS" ] || return 0
+  for f in "$ENTITLEMENTS"/*.json; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$ENTITLEMENTS/${2:-}.json" ] && continue
+    [ "$(jq -r '.codespace // empty' "$f" 2>/dev/null)" = "$1" ] && rm -f "$f"
+  done
+  return 0
+}
+
+# What container $3 of codespace $1 may get a token for: its own repository,
+# from the checkout's origin, as in real Codespaces. Workflows is left out —
+# a codespace that edits CI asks for it (docs/GITHUB-APP.md §4.6, phase 4).
+# The broker trusts this file and nothing a request says.
+write_entitlement() {
+  local name=$1 ws=$2 cid=$3 repo tmp
+  [ -d "$ENTITLEMENTS" ] || return 0
+  repo=$(github_repo "$ws")
+  drop_entitlements "$name" "$cid"
+  tmp=$(mktemp "$ENTITLEMENTS/.XXXXXX")
+  jq -n --arg n "$name" --arg r "$repo" '{
+    codespace: $n,
+    repositories: (if $r == "" then {} else {($r): {
+      contents: "write", metadata: "read", pull_requests: "write", issues: "write"
+    }} end)
+  }' > "$tmp"
+  mv "$tmp" "$ENTITLEMENTS/$cid.json"
+  echo "$repo"
 }
 
 container_of() { docker ps -q --filter "label=codespace=$1" | head -1; }
@@ -917,6 +969,10 @@ cmd_up() {
     ' _ "$signing" "$CONTAINER_AUTH" 2>/dev/null || note "note: could not set container git signing config"
   fi
 
+  # Scoped GitHub tokens: what this container may ask the broker for.
+  local token_repo
+  token_repo=$(write_entitlement "$name" "$ws" "$cid")
+
   # With a key available, reach GitHub over SSH even for https remotes, so a
   # repo cloned over https can still be pushed. Tied to authentication, not to
   # signing: VM-side signing needs no key in the container.
@@ -1098,6 +1154,7 @@ cmd_up() {
   echo "  https://localhost:$port/"
   [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
   [ "$signing" = vm ] && echo "  git: commits signed on the VM (GIT_SIGNING=vm)"
+  [ -n "$token_repo" ] && [ "$have_auth" = 1 ] && echo "  token: scoped to $token_repo, from /mnt/github/token.sock"
   [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
   [ "$git_ssh" = locked ] && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
   [ -n "$gh_token" ] && echo "  gh:  authenticated with the VM's token"
@@ -1432,6 +1489,7 @@ cmd_rm() {
     note "removing container for $name"
     docker rm -f "$cid" >/dev/null
   fi
+  drop_entitlements "$name"
 
   # Only after the container is gone: docker refuses to remove a volume any
   # container still references, stopped ones included.
@@ -1676,6 +1734,7 @@ cmd_gc() {
     else
       note "removing container for $name (idle ${idle}d >= ${days}d); checkout kept"
       docker rm "$cid" >/dev/null || note "could not remove the container for $name"
+      drop_entitlements "$name"
     fi
     swept=$(( swept + 1 ))
   done

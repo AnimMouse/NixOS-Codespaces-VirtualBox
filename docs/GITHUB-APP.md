@@ -90,14 +90,20 @@ User access tokens (*checked*, GitHub Apps docs):
   token plus `target`, `repositories` or `repository_ids`, and `permissions`, and
   returns a token limited to them.
 
-**Verify:**
-- [ ] How `/token/scoped` authenticates. The docs body does not say; the sibling
-      `/applications/{client_id}/token` endpoints use HTTP basic auth with the
-      client ID and **client secret**. Plan for needing the secret.
-- [ ] The scoped token's lifetime — whether it inherits the parent's remaining
-      8 hours, or gets its own.
-- [ ] That a scoped token works for `git push` over HTTPS and for `gh` (PRs,
-      issues) on that repository, and gets 403/404 on every other.
+**Verify** — answered on the VM, from the dev-vm codespace, with the agent
+unset and the https→ssh rewrites disabled so only the token could authenticate:
+- [x] `/token/scoped` accepts HTTP basic auth with the client ID and **client
+      secret**, as the broker sends it. Without the secret is untested.
+- [x] A scoped token from a fresh account token lives **8 hours**; GitHub's
+      `github-authentication-token-expiration` header agrees with the broker's
+      cache. Still open: whether one scoped from an *older* account token gets
+      only that token's remaining time. The broker uses GitHub's `expires_at`
+      either way.
+- [x] It is a `ghu_` user-to-server token acting as the account (`/user` says
+      `type: User`, not a bot). `git push --dry-run` over https to its own
+      repository is accepted; another of the account's repositories is
+      refused with **403** by git and by the API. `gh` itself is not in that
+      codespace; it is checked with the shim in phase 3.
 
 ---
 
@@ -182,7 +188,25 @@ It runs again only if the refresh token lapses: unused for 6 months, or
 revoked. The broker says so by name rather than failing opaquely, the way the
 launcher names the `ssh-add` to run for a locked key (CLAUDE.md §8).
 
-### 4.3 The token broker
+### 4.3 The token broker — built, run against GitHub
+
+`scripts/github-token-service`, `codespace-token.socket` in
+`modules/codespace-auth.nix`, and `write_entitlement` in the launcher. Decided
+here: **socket-activated handlers with a lock**, not one long-running process —
+the same shape as signing, at `/run/codespace-auth/token.sock`, already inside
+every container's `/mnt/github`. The caller is identified through
+`SO_PEERPIDFD` (pidfd → PID → cgroup → container, then the pidfd re-checked),
+which closes the PID-reuse race. Entitlements live in
+`/run/codespace-auth-state/entitlements/<container-id>.json`, written by the
+launcher at every `up` and dropped with the container. `GET /token` returns the
+token as plain text; `GET /whoami` the entitlement and expiry, never the token.
+
+*Tested* against a strict mock of GitHub, where each refresh token works once:
+rotation persisted across four refreshes, cache hits made no calls, a scoped
+token near expiry was re-scoped without a refresh, eight concurrent requests
+with empty caches made exactly one refresh, and a lapsed refresh token
+answered "run github-app-login". The real pidfd path refused a caller in no
+container.
 
 - Runs as `dev`, as a NixOS service (CLAUDE.md §10).
 - Entitlement per codespace, written by the launcher at `up` to
@@ -344,7 +368,7 @@ Each phase ships on its own and leaves the system working.
    work — this proves VM-side signing, "Verified" on GitHub included, before
    anything depends on it.
 2. **App and broker on the VM.** Register the app (done), `github-app-login`
-   (built), the broker. Checked by hand with `curl --unix-socket`: a scoped token pushes to
+   (built, run), the broker (built). Checked by hand with `curl --unix-socket`: a scoped token pushes to
    its repo and is refused by another. Containers still untouched.
 3. **Containers switch — the hole closes here.** In one step: stop forwarding
    the agent and drop keyfile mode, add the credential helper and `gh` shim,
