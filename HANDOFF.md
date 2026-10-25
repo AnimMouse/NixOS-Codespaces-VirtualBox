@@ -82,6 +82,10 @@ If you touch any of these, you can now test them properly rather than by proxy.
   (`codespace-proxy@` has since been replaced by nginx.)
 - **`rebuild` stops when nothing changed:** a second `rebuild` printed
   `no changes: already running …` and did not switch.
+- **`--config template`** comes up with gh, Node, Claude Code and
+  `CLAUDE_CONFIG_DIR` on the volume, and commits sign. Its features cost about
+  a minute on the first build ever; after that every codespace on the same
+  template hits the build cache — 33 s to create against 30 s for `plain`.
 - **docker-in-docker on a 24.04 image**, in a throwaway codespace: the feature
   installed `iptables-legacy` as predicted, the launcher printed
   `switching to iptables-nft` and `dockerd is up`, and `docker run --rm
