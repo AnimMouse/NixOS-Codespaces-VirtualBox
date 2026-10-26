@@ -162,12 +162,21 @@ does not script it.
 | Webhook | **Inactive** | nothing listens |
 | Device flow | **Enabled** | the VM is headless; GitHub refuses the flow otherwise (*checked*) |
 | Expire user authorization tokens | **On** (the default) | a leaked token dies in hours |
-| Repository permissions | Contents RW, Metadata R, Pull requests RW, Issues RW, Workflows RW, Actions R | the ceiling; each token asks for a subset |
+| Repository permissions | Contents RW, Metadata R, Pull requests RW, Issues RW, Workflows RW, Actions RW, Checks R, Commit statuses R | the ceiling; each token asks for a subset |
 | Install on | **All repositories** | new repos work without revisiting settings; scoping happens per token, not per install |
 
 Workflows RW is in the ceiling because pushing a change under
-`.github/workflows/` is refused without it. It is granted per token only when
-asked for (§4.6).
+`.github/workflows/` is refused without it, and Actions RW because
+dispatching a workflow (`gh workflow run`), re-running or cancelling one is.
+Both are granted per token only when asked for (§4.6).
+
+**Changing the ceiling has an order.** GitHub refuses a scoped token that
+asks for a permission the app lacks — the whole token, not that permission —
+so add it to the app first, accept it on the installation (GitHub asks the
+account to approve an app's new permissions), and only then rebuild a
+launcher that asks for it. Checks and Commit statuses read, and Actions
+raised to write, were added this way, after the first codespaces on the app
+found CI unreadable and could not dispatch a workflow.
 
 Only the client ID and client secret come out of this; both go to
 `/persist/github-app/`, never into the repo — the same rule as the git identity
@@ -342,19 +351,54 @@ prints the broker's reason to stderr first.
 ### 4.6 Permissions per token
 
 Default for the source repository: Contents RW, Metadata R, Pull requests RW,
-Issues RW. Not Workflows — a codespace that edits CI says so:
+Issues RW, and read on Actions, Checks and Commit statuses — CI's results,
+which `gh pr checks` and `gh run view` need and which a token without them
+cannot see. Not changing CI: editing `.github/workflows/` needs Workflows
+write and `gh workflow run` Actions write, and both start jobs with the
+repository's secrets, so a codespace that does either says so — and `up` asks
+you to approve it:
 
 ```jsonc
 "customizations": {
   "codespaces": {
     "repositories": {
-      "you/this-repo": { "permissions": { "contents": "write", "workflows": "write" } }
+      "you/this-repo": { "permissions": { "workflows": "write", "actions": "write" } }
     }
   }
 }
 ```
 
 Read-only when you cannot write to the source repository, as in Codespaces.
+
+**What each caller gets**, in one place. The launcher's `SOURCE_PERMISSIONS`
+and `APP_PERMISSIONS` are the source of truth for the first two columns; the
+app's settings (§4.1) for the last.
+
+| Permission | A codespace, its own repository, by default | A codespace, by request and approval | The VM (§6.1) |
+|---|---|---|---|
+| Contents | write | write | write |
+| Pull requests | write | write | write |
+| Issues | write | write | write |
+| Actions | read — `gh run list`, `gh run view` | **write** — `gh workflow run`, re-run, cancel | write |
+| Checks | read — `gh pr checks` | read | read |
+| Commit statuses | read | read | read |
+| Workflows | — | **write** — push under `.github/workflows/` | write |
+| Metadata | read | read | read |
+
+| | A codespace | The VM |
+|---|---|---|
+| Repositories | its own; others of the same owner only through `customizations.codespaces.repositories`, approved at `up` | every repository the app is installed on — on a personal account set to *All repositories*, all of yours; an organisation's only where it installed the app |
+| Narrowed by | the request, your approval, and read-only where you cannot push | nothing but the app's permissions |
+| Token | scoped per permission set, 8 hours, revoked when the container goes | the account-wide user token, 8 hours, refreshed by the broker |
+| Picks up a change to the app | at its next `up`, which rewrites its entitlement | at the broker's next refresh — no rebuild |
+
+Every cell is also capped by your own access to each repository: where you
+only read, the token only reads. Nothing in either column reaches what the app
+lacks — repository administration (`gh repo create`, settings, deletion),
+secrets and variables, Pages, packages, deploy keys, webhooks, or account
+scope (SSH and GPG keys, emails, gists). Those answer 403 "Resource not
+accessible by integration"; `GH_TOKEN=<a PAT> gh …` covers a one-off, and a
+permission added to the app (§4.1, in its order) covers the rest.
 
 ### 4.7 Parity — phase 4, built
 
@@ -537,9 +581,9 @@ app, leaving the key one job: signing.
 **Design**
 
 - **The broker answers the VM** (`scripts/github-token-service`). A caller
-  gets the **account-wide** user token — every repository the app is installed
-  on — rather than a scoped one: the VM is trusted, and holds the refresh token
-  anyway. It must be the broker, not a second client: two processes refreshing
+  gets the **account-wide** user token (§4.6 tabulates what it carries) —
+  every repository the app is installed on — rather than a scoped one: the VM
+  is trusted, and holds the refresh token anyway. It must be the broker, not a second client: two processes refreshing
   independently would rotate each other's refresh token out. *The VM* is two
   conditions, both read from the kernel: no Docker container in the caller's
   cgroup, **and** the broker's own PID namespace. The second was not in the
