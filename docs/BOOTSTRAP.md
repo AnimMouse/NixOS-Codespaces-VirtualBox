@@ -51,9 +51,12 @@ because that encodes the `.vdi`'s random serial and would change every time
 The PCI address is VirtualBox's default PIIX3 SATA controller. If you switch the
 VM to ICH9, it changes, and both disko files need updating.
 
-EFI is off deliberately — VirtualBox's EFI implementation loses its boot entry
-often enough to be a recurring nuisance, and there is no console-free way out of
-the EFI shell on a headless VM.
+EFI is off deliberately. UEFI would give this VM nothing it needs, and its
+failures are worse on a headless VM: a missing boot entry — which VirtualBox's
+EFI loses often, unless the loader is installed to the removable fallback
+path — lands in the EFI shell, with no console-free way out. BIOS boot is the
+path proven through a full wipe and reinstall. CLAUDE.md §9 has the
+reasoning.
 
 **Port forwards** (Settings → Network → Adapter 1 → Advanced → Port Forwarding).
 Set Host IP to `127.0.0.1` on every rule — not blank. A blank host IP binds

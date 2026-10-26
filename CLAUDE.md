@@ -329,8 +329,17 @@ proven, so the precondition is met.
   and differently on the ISO than on the installed system — which pointed both
   the partitioner and `grub-install` at the wrong disk. Not `by-id` either: that
   encodes the `.vdi`'s serial, which changes every time `system.vdi` is recreated.
-- **BIOS/GRUB, not UEFI.** VirtualBox's EFI loses its boot entry too often, and
-  a headless VM gives no way out of the EFI shell.
+- **BIOS/GRUB, not UEFI.** Chosen because VirtualBox's EFI loses its boot
+  entry, which drops a headless VM at the EFI shell with no clean way out.
+  *Revisited*: the lost entry alone has a known fix — install the loader to
+  the removable fallback path (`\EFI\BOOT\BOOTX64.EFI`, `efiInstallAsRemovable`
+  or `canTouchEfiVariables = false`), which firmware finds without one — so it
+  is not what keeps BIOS. What does: UEFI offers this VM nothing it needs
+  (systemd-boot is cosmetic, Secure Boot guards against nothing here, and
+  disko already uses GPT under BIOS), while switching costs a reinstall
+  onto a new layout and swaps a boot path proven through a full wipe for an
+  untested one, whose failures land in the EFI shell rather than at GRUB's
+  rescue prompt. Revisit for a TPM-unlocked encrypted `/persist`.
 - **Two disko entry points** (§7).
 - **Docker uses `data-root`, not a bind mount** of `/var/lib/docker`. A bind
   mount needs its source to exist before systemd mounts it; `dockerd` creates

@@ -1077,8 +1077,9 @@ on the host**, and that one fact drives most of the design:
   virtualisation.
 - **`code-server` inside each container**, so language servers run on normal FHS
   userland and `nix-ld` is unnecessary. No Electron anywhere.
-- **BIOS/GRUB, not UEFI.** VirtualBox's EFI loses its boot entry too often, and a
-  headless VM gives no graceful exit from the EFI shell.
+- **BIOS/GRUB, not UEFI.** UEFI offers this VM nothing it needs, and a
+  headless VM gives no graceful exit from the EFI shell when a boot entry is
+  lost. Revisited in CLAUDE.md §9.
 - **Disks by SATA slot**, never `/dev/sdX` — the kernel assigns letters in probe
   order, differently on the ISO than on the installed system.
 - **Distinct ports, not subdomain routing** — `*.localhost` resolution is

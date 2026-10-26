@@ -1,9 +1,11 @@
 # system.vdi — the disposable disk. Nix store and OS only.
 #
-# GPT + BIOS boot (EF02) rather than UEFI on purpose: VirtualBox's EFI NVRAM
-# routinely forgets boot entries and drops you at the EFI shell, and §7 has the
-# user creating the VM by hand in the GUI. BIOS/GRUB needs no extra checkbox and
-# no recovery ritual.
+# GPT + BIOS boot (EF02) rather than UEFI on purpose. UEFI gives this VM
+# nothing it needs, and its failures are worse headless: VirtualBox's EFI NVRAM
+# forgets boot entries (avoidable by installing to the removable fallback path)
+# and drops you at the EFI shell. BIOS/GRUB is the path proven through a full
+# wipe and reinstall, needs no extra checkbox in the GUI, and no recovery
+# ritual. CLAUDE.md §9 has the full reasoning.
 #
 # Addressed by SATA port, not by /dev/sdX and not by /dev/disk/by-id/.
 #
