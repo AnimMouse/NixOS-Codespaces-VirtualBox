@@ -400,6 +400,47 @@ scope (SSH and GPG keys, emails, gists). Those answer 403 "Resource not
 accessible by integration"; `GH_TOKEN=<a PAT> gh …` covers a one-off, and a
 permission added to the app (§4.1, in its order) covers the rest.
 
+**Beyond the app: a PAT, not a higher ceiling.** When a codespace needs
+something exotic — creating a repository, moving cards on a GitHub Project —
+the answer is a narrow personal access token, not another permission on the
+app:
+
+- **Raising the app raises the VM, everywhere.** The VM's token is never
+  narrowed (the table above), so Administration write added for one
+  codespace's `gh repo create` lets the VM delete, rename and re-protect every
+  repository the app is installed on, for good. Approval at `up` guards
+  codespaces, not the VM. The ceiling is for what is routine and low-risk on
+  many repositories — read-only Discussions or Pages, say — not for one-offs.
+- **Real Codespaces does not grant these either.** Its token cannot create
+  repositories or manage Projects; a PAT is the answer there too, so the
+  `devcontainer.json` stays portable.
+- **They do not fit the per-repository model.** Creating a repository acts on
+  the account, not on a repository a token is scoped to — a token scoped to
+  named repositories most likely cannot do it (**verify** before relying on
+  `owner/*` for it). Projects (v2) permissions belong to the account or
+  organisation, which `customizations.codespaces.repositories` cannot express.
+
+How:
+
+- **Fine-grained, minimal, expiring**: Projects only, or Administration on the
+  one organisation you create repositories in. A fine-grained PAT has not
+  always reached Projects owned by a *user* account, as opposed to an
+  organisation; if it is refused, a classic PAT with only the `project` scope
+  (**verify** GitHub's current support).
+- **Under its own name, never `GH_TOKEN`.** `GH_TOKEN` outranks the scoped
+  token in gh *and* in git's credential helper, so the whole codespace would
+  push with the PAT. Put it in that codespace's
+  `/persist/codespace/<name>/secrets` (`KEY=value`, mode `0600`; it reaches
+  `~/.codespace-secrets` at the next `up`, and no other codespace), and use it
+  per command:
+  ```bash
+  GH_TOKEN=$PROJECTS_TOKEN gh project item-edit …
+  ```
+  `/persist/codespace/secrets` would hand it to every codespace instead.
+- **Create repositories on the VM**, where cloning already happens:
+  `GH_TOKEN=<PAT> gh repo create …`, or the web UI, then `codespace up
+  github.com/you/new-repo`.
+
 ### 4.7 Parity — phase 4, built
 
 **Other repositories.** At `up`, the launcher reads
