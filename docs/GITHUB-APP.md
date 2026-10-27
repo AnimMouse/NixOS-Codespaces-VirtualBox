@@ -566,6 +566,12 @@ and `administration` on its own:
   revokes its cached tokens (`DELETE /applications/{client_id}/token`), as do
   `gc` and `rebuild` for the container they replace (§4.7). Scoped tokens
   expire on their own regardless.
+- **Issues, PRs, comments and reviews made through `gh` carry the app's
+  name** ("opened this … with <app>"): GitHub labels anything created with an
+  app's user token, and since phase 5 that is every `gh`, the VM's included.
+  Commits and pushes show nothing, nor does the web UI. Renaming the app
+  renames the badge, on old items too, with no change on the VM; only a PAT
+  (`GH_TOKEN=…`) avoids it.
 - **Organisations must install the app.** A user access token reaches only
   where both you and the app can: acting *as* you is not acting *everywhere*
   you can. So an org's repositories need the app installed on that org — by
