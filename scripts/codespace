@@ -46,14 +46,14 @@ GITHUB_APP_DIR=@GITHUB_APP_DIR@
 # was registered with (docs/GITHUB-APP.md §4.1). A token asking for more is
 # refused by GitHub outright, so requests are clamped to this, and anything
 # else in customizations.codespaces.repositories is dropped with a note.
-APP_PERMISSIONS='{"contents":"write","pull_requests":"write","issues":"write","workflows":"write","actions":"write","checks":"read","statuses":"read","metadata":"read"}'
+# Codespaces' own maximum, probed from a real codespace's token, less
+# repository_projects (classic Projects, deprecated).
+APP_PERMISSIONS='{"contents":"write","pull_requests":"write","issues":"write","workflows":"write","actions":"write","checks":"write","deployments":"write","discussions":"write","pages":"write","statuses":"write","packages":"read","metadata":"read"}'
 # The codespace's own repository gets this unless its devcontainer.json asks
-# for more, as in Codespaces. Reading CI — runs, checks, commit statuses — is
-# part of working on a branch (`gh pr checks`, `gh run view`), so it is in.
-# Changing CI is not: workflows write (editing .github/workflows) and actions
-# write (`gh workflow run`, re-runs) start jobs with the repository's
-# secrets, so a codespace asks for them and you approve it at `up`.
-SOURCE_PERMISSIONS='{"contents":"write","metadata":"read","pull_requests":"write","issues":"write","actions":"read","checks":"read","statuses":"read"}'
+# for more: what a real codespace's token was probed to carry by default —
+# write on code, PRs, issues and workflow files, read on everything else
+# Codespaces can grant, and no packages.
+SOURCE_PERMISSIONS='{"contents":"write","metadata":"read","pull_requests":"write","issues":"write","workflows":"write","actions":"read","checks":"read","deployments":"read","discussions":"read","pages":"read","statuses":"read"}'
 # Where a codespace's own snapshot of the dotfiles appears, when
 # DOTFILES_REPOSITORY is a repository on the VM. See snapshot_dotfiles.
 CONTAINER_DOTFILES=/mnt/dotfiles

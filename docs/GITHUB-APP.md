@@ -162,13 +162,13 @@ does not script it.
 | Webhook | **Inactive** | nothing listens |
 | Device flow | **Enabled** | the VM is headless; GitHub refuses the flow otherwise (*checked*) |
 | Expire user authorization tokens | **On** (the default) | a leaked token dies in hours |
-| Repository permissions | Contents RW, Metadata R, Pull requests RW, Issues RW, Workflows RW, Actions RW, Checks R, Commit statuses R | the ceiling; each token asks for a subset |
+| Repository permissions | Contents, Pull requests, Issues, Workflows, Actions, Checks, Deployments, Discussions, Pages, Commit statuses: RW. Packages R, Metadata R | the ceiling — Codespaces' own; each token asks for a subset |
 | Install on | **All repositories** | new repos work without revisiting settings; scoping happens per token, not per install |
 
-Workflows RW is in the ceiling because pushing a change under
-`.github/workflows/` is refused without it, and Actions RW because
-dispatching a workflow (`gh workflow run`), re-running or cancelling one is.
-Both are granted per token only when asked for (§4.6).
+The ceiling is what a real codespace's token can be granted through
+`customizations.codespaces.repositories`, probed from inside one (2026-10-29),
+less Projects (classic): that feature is deprecated, and a repository with it
+off answers 404 either way. Packages is read only, as in Codespaces.
 
 **Changing the ceiling has an order.** GitHub refuses a scoped token that
 asks for a permission the app lacks — the whole token, not that permission —
@@ -176,7 +176,10 @@ so add it to the app first, accept it on the installation (GitHub asks the
 account to approve an app's new permissions), and only then rebuild a
 launcher that asks for it. Checks and Commit statuses read, and Actions
 raised to write, were added this way, after the first codespaces on the app
-found CI unreadable and could not dispatch a workflow.
+found CI unreadable and could not dispatch a workflow; then the rest of
+Codespaces' ceiling. Every codespace's default asks for Deployments,
+Discussions and Pages, so until the app has them **every** codespace token is
+refused.
 
 Only the client ID and client secret come out of this; both go to
 `/persist/github-app/`, never into the repo — the same rule as the git identity
@@ -350,23 +353,27 @@ prints the broker's reason to stderr first.
 
 ### 4.6 Permissions per token
 
-Default for the source repository: Contents RW, Metadata R, Pull requests RW,
-Issues RW, and read on Actions, Checks and Commit statuses — CI's results,
-which `gh pr checks` and `gh run view` need and which a token without them
-cannot see. Not changing CI: editing `.github/workflows/` needs Workflows
-write and `gh workflow run` Actions write, and both start jobs with the
-repository's secrets, so a codespace that does either says so — and `up` asks
-you to approve it:
+Default for the source repository: what a real codespace's token carries,
+probed from inside one (2026-10-29) — write on Contents, Pull requests, Issues
+and Workflows; read on Actions, Checks, Deployments, Discussions, Pages and
+Commit statuses; no Packages. Anything more — dispatching a workflow, creating
+a check run or a discussion — the codespace asks for, and `up` asks you to
+approve it:
 
 ```jsonc
 "customizations": {
   "codespaces": {
     "repositories": {
-      "you/this-repo": { "permissions": { "workflows": "write", "actions": "write" } }
+      "you/this-repo": { "permissions": { "actions": "write" } }
     }
   }
 }
 ```
+
+Workflows write by default is Codespaces' choice, kept for parity, and a
+trade: a codespace can push a changed workflow, and that workflow runs with
+the repository's secrets once it is triggered. Earlier this launcher held it
+back for approval; it no longer does.
 
 Read-only when you cannot write to the source repository, as in Codespaces.
 
@@ -379,10 +386,14 @@ app's settings (§4.1) for the last.
 | Contents | write | write | write |
 | Pull requests | write | write | write |
 | Issues | write | write | write |
+| Workflows | write — push under `.github/workflows/` | write | write |
 | Actions | read — `gh run list`, `gh run view` | **write** — `gh workflow run`, re-run, cancel | write |
-| Checks | read — `gh pr checks` | read | read |
-| Commit statuses | read | read | read |
-| Workflows | — | **write** — push under `.github/workflows/` | write |
+| Checks | read — `gh pr checks` | **write** — create check runs | write |
+| Commit statuses | read | **write** — set a commit's status | write |
+| Deployments | read | **write** | write |
+| Discussions | read | **write** | write |
+| Pages | read | **write** — request a build, configure | write |
+| Packages | — | read | read |
 | Metadata | read | read | read |
 
 | | A codespace | The VM |
@@ -395,7 +406,7 @@ app's settings (§4.1) for the last.
 Every cell is also capped by your own access to each repository: where you
 only read, the token only reads. Nothing in either column reaches what the app
 lacks — repository administration (`gh repo create`, settings, deletion),
-secrets and variables, Pages, packages, deploy keys, webhooks, or account
+secrets and variables, publishing packages, deploy keys, webhooks, or account
 scope (SSH and GPG keys, emails, gists). Those answer 403 "Resource not
 accessible by integration"; `GH_TOKEN=<a PAT> gh …` covers a one-off, and a
 permission added to the app (§4.1, in its order) covers the rest.
@@ -409,8 +420,8 @@ app:
   narrowed (the table above), so Administration write added for one
   codespace's `gh repo create` lets the VM delete, rename and re-protect every
   repository the app is installed on, for good. Approval at `up` guards
-  codespaces, not the VM. The ceiling is for what is routine and low-risk on
-  many repositories — read-only Discussions or Pages, say — not for one-offs.
+  codespaces, not the VM. The ceiling is Codespaces' own and stops there —
+  what a codespace can be granted on GitHub too — not one-offs beyond it.
 - **Real Codespaces does not grant these either.** Its token cannot create
   repositories or manage Projects; a PAT is the answer there too, so the
   `devcontainer.json` stays portable.

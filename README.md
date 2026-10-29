@@ -795,7 +795,7 @@ needs no credential at all.
     "repositories": {
       "you/lib":   { "permissions": "read-all" },
       "you/infra": { "permissions": { "contents": "write", "pull_requests": "write" } },
-      "you/this-repo": { "permissions": { "workflows": "write" } }
+      "you/this-repo": { "permissions": { "actions": "write" } }
     }
   }
 }
@@ -805,8 +805,9 @@ needs no credential at all.
   Codespaces; `you/*` means all of them. Permissions are `read-all`,
   `write-all`, or a map, capped at what the app was registered with —
   anything else is dropped with a note.
-- Naming the codespace's own repository adds to its defaults; that is how a
-  codespace that edits `.github/workflows/` asks for `workflows`.
+- Naming the codespace's own repository adds to its defaults, which are
+  Codespaces' own (docs/GITHUB-APP.md §4.6); that is how a codespace that
+  dispatches workflows asks for `actions` write.
 - **Every new or widened request is shown at `up` and asks for a yes.** The
   container can edit its own `devcontainer.json`, so a request is not a grant.
   With no terminal to ask at — the retention sweep, a script — it is left out
