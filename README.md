@@ -46,7 +46,7 @@ name or size.
 |---|---|---|
 | `127.0.0.1:2222` | 22 | SSH |
 | `127.0.0.1:8000` | 8000 | Hub editor |
-| `127.0.0.1:8001-8010` | 8001-8010 | One per codespace |
+| `127.0.0.1:8001-8020` | 8001-8020 | One per codespace |
 
 Then, from the NixOS ISO:
 

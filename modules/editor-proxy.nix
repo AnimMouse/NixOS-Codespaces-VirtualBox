@@ -13,7 +13,7 @@ let
   # observed with a bind()-created socket, not assumed. Only nginx and dev can
   # traverse it; a container sees only the one directory mounted into it.
   editorsDir = "/run/editors";
-  ports = lib.range 8000 8010;
+  ports = lib.range 8000 8020;
 
   editor-tls = pkgs.writeShellApplication {
     name = "editor-tls";

@@ -66,9 +66,9 @@ Set Host IP to `127.0.0.1` on every rule — not blank. A blank host IP binds
 |---|---|---|---|
 | ssh | 127.0.0.1 | 2222 | 22 |
 | hub | 127.0.0.1 | 8000 | 8000 |
-| ide01 … ide10 | 127.0.0.1 | 8001 … 8010 | 8001 … 8010 |
+| ide01 … ide20 | 127.0.0.1 | 8001 … 8020 | 8001 … 8020 |
 
-8000 is the hub editor on the VM, 8001–8010 one per codespace.
+8000 is the hub editor on the VM, 8001–8020 one per codespace.
 
 > **Turtle icon** in the status bar after boot means Hyper-V has leaked back and
 > VirtualBox has fallen back to the Windows Hypervisor Platform API. Performance

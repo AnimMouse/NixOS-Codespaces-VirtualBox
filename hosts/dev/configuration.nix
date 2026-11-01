@@ -42,11 +42,11 @@
     firewall = {
       enable = true;
       allowedTCPPorts = [ 22 ];
-      # Phase 2: hub code-server on 8000, per-container editors on 8001-8010.
+      # Phase 2: hub code-server on 8000, per-container editors on 8001-8020.
       # Opened now so the §3 NAT forwards work the moment those services exist,
       # rather than failing as a silent connection refused after a rebuild.
       allowedTCPPortRanges = [
-        { from = 8000; to = 8010; }
+        { from = 8000; to = 8020; }
       ];
     };
   };

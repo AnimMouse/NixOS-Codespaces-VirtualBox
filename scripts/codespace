@@ -14,7 +14,7 @@
 # pkgs.writeShellApplication, which supplies one and runs shellcheck.
 
 PORT_MIN=8001
-PORT_MAX=8010
+PORT_MAX=8020
 REPOS=/persist/repos
 REFS=/persist/refs
 # Mounted at /workspaces/$REFS_NAME, which makes it a reserved codespace name:

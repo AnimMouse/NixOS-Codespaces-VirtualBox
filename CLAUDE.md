@@ -75,7 +75,7 @@ workers, and several code-server features.
 |---|---|---|
 | `127.0.0.1:2222` | 22 | SSH / rebuilds |
 | `127.0.0.1:8000` | 8000 | Hub code-server |
-| `127.0.0.1:8001-8010` | 8001-8010 | Per-container editors |
+| `127.0.0.1:8001-8020` | 8001-8020 | Per-container editors |
 
 Distinct ports, not subdomain routing — `*.localhost` resolution is inconsistent
 across platforms and not worth debugging.
