@@ -114,7 +114,19 @@ slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's![^a-z0-9._-]!-!g; s!
 # its own workspace over /workspaces/$REFS_NAME, and every reference repo
 # silently disappears from that container. Checked against the *resolved* name,
 # because a URL like github.com/someone/refs also lands on it.
+#
+# A leading dot is refused for the same reason and more: the template mounts
+# the codespace's own volume at /workspaces/.persist, which a checkout of that
+# name would collide with, and every `$STATE/*/` loop skips dot-names — so such
+# a codespace is missing from list and gc, invisible to port allocation, and
+# its code-server version unprotected from gc, and `.removed` is this script's
+# own. GitHub allows such repos (`.github`), so the resolved name is checked.
 reject_reserved() {
+  case "$1" in
+    .*) die "'$1' starts with a dot, which codespace names cannot — /workspaces/.persist is the
+  template's own mount, and the launcher's state keeps dot-names for itself.
+  Use another name: git clone <url> $REPOS/${1#.} && codespace up ${1#.}" ;;
+  esac
   [ "$1" = "$REFS_NAME" ] || return 0
   die "'$REFS_NAME' is reserved — /workspaces/$REFS_NAME is the shared reference mount.
   Use another name: git clone <url> $REPOS/${REFS_NAME}-something && codespace up ${REFS_NAME}-something
