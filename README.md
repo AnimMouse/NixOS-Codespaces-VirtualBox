@@ -951,7 +951,7 @@ wins and your config just never applies.
 | `--config` | Uses |
 |---|---|
 | `repo` | the repo's own `.devcontainer/devcontainer.json` (or `.devcontainer.json`) |
-| `template` | [`templates/devcontainer.json`](templates/devcontainer.json) — Ubuntu 26.04, gh, Node, Claude Code with its state on a volume |
+| `template` | [`templates/devcontainer.json`](templates/devcontainer.json) — Ubuntu 26.04, gh, Node, Claude Code with its state on a volume, and `/workspaces/.persist`: the codespace's own directory outside the checkout, kept across rebuilds |
 | `plain` | the base image and nothing else |
 | a path | any devcontainer.json, e.g. `/persist/refs/devcontainer.json` |
 | `auto` | forget an earlier choice |

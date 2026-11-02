@@ -38,11 +38,22 @@
   },
 
   // Claude Code's state — login, settings, sessions, memory — on a volume, so
-  // a rebuild keeps it. ${devcontainerId} because Docker's volume namespace is
-  // flat and global: a fixed name would be one shared directory for every
-  // codespace made from this template.
+  // a rebuild keeps it.
+  //
+  // /workspaces/.persist: a directory of this codespace's own that a rebuild
+  // keeps, outside the checkout, so nothing in it can be committed, pushed or
+  // picked up by the repo's tooling. Notes, downloads, build output, a local
+  // database. A sibling of the checkout because that is where it survives in
+  // real Codespaces too, which keeps all of /workspaces across a rebuild —
+  // there the volume is redundant, and the path still works.
+  //
+  // ${devcontainerId} in both because Docker's volume namespace is flat and
+  // global: a fixed name would be one shared directory for every codespace
+  // made from this template, unlike /workspaces/refs, which is shared on
+  // purpose.
   "mounts": [
-    "source=claude-${devcontainerId},target=/home/vscode/.claude,type=volume"
+    "source=claude-${devcontainerId},target=/home/vscode/.claude,type=volume",
+    "source=persist-${devcontainerId},target=/workspaces/.persist,type=volume"
   ],
 
   // Claude Code keeps one file outside ~/.claude — ~/.claude.json, its global
@@ -54,11 +65,11 @@
   },
 
   // Both chowns are required, in this order:
-  //  - Docker creates the volume's mount point root-owned, since the path is
-  //    not in the image; without the first, Claude Code cannot write its own
-  //    directory.
+  //  - Docker creates a volume's mount point root-owned when the path is not
+  //    in the image; without these, Claude Code cannot write its own
+  //    directory, nor you /workspaces/.persist.
   //  - Features install as root, so Claude Code's npm package lands root-owned
   //    and its self-update fails with "no write permission to npm prefix".
   //    `npm prefix -g` because the path embeds the Node version.
-  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude && sudo chown -R $(id -u):$(id -g) \"$(npm prefix -g)/lib/node_modules/@anthropic-ai\""
+  "postCreateCommand": "sudo chown -R $(id -u):$(id -g) ~/.claude /workspaces/.persist && sudo chown -R $(id -u):$(id -g) \"$(npm prefix -g)/lib/node_modules/@anthropic-ai\""
 }
