@@ -529,7 +529,7 @@ requested_repositories() {
   out=$(printf '%s' "$cfg" | jq -c --argjson cap "$APP_PERMISSIONS" --arg src "$source" '
     def rank: if . == "write" then 2 elif . == "read" then 1 else 0 end;
     (.configuration.customizations.codespaces.repositories // {}) as $req
-    | ($src | split("/")[0] | ascii_downcase) as $owner
+    | (($src | split("/")[0]) // "" | ascii_downcase) as $owner
     | reduce ($req | to_entries[]) as $e ({granted: {}, dropped: []};
         ($e.value.permissions // null) as $p
         | if ($e.key | test("^[A-Za-z0-9_.-]+/([A-Za-z0-9_.-]+|\\*)$") | not) then
