@@ -316,8 +316,9 @@ typo and watching `SC2154` stop it.
   <name>/                        port, generated devcontainer.json, secrets, last_used,
                                  dotfiles.git — its own snapshot of /persist/dotfiles,
                                  repositories.approved — other repositories you granted it
-/persist/code-server/           hub editor extensions and state (a leftover `pw`
-                                 is no longer read — delete it)
+/persist/code-server/           hub editor extensions and state, in use (a leftover `pw`
+                                 or `env` is the old password, no longer read —
+                                 `vm leftovers` lists them)
 /persist/github-app/             the app's client_id, client_secret and refresh
                                  token — github-app-login writes the last
 /persist/tls/                    editor CA, nginx's certificate, your browser's

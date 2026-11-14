@@ -171,6 +171,7 @@ cmd_leftovers() {
   for f in \
     "/persist/git/known_hosts|github-known-hosts.service wrote it for SSH git in containers; nothing reads it|$kh_fix" \
     "/persist/code-server/pw|the hub editor's password from before nginx|rm /persist/code-server/pw" \
+    "/persist/code-server/env|the same password, as PASSWORD= for the hub's old EnvironmentFile|rm /persist/code-server/env" \
     "/persist/codespace/cache|code-server tarballs from before the shared store|rm -rf /persist/codespace/cache"
   do
     local path=${f%%|*} rest=${f#*|}

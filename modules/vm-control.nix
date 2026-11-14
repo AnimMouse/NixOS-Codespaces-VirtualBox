@@ -89,14 +89,16 @@ in
       # `vm leftovers` can see the rest: a file hidden this way still exists,
       # as an unreadable node, which is all that verb asks. /persist/git's
       # other files — the public key, identity, allowed_signers — are mounted
-      # into every container already. code-server's `pw` is the old editor
-      # password, hidden until it is deleted.
+      # into every container already. code-server's `pw` and `env` are the old
+      # editor password, hidden until they are deleted; the directory itself
+      # is the hub editor's state, still in use.
       InaccessiblePaths = map (x: "-${x}") [
         "/persist/git/id_ed25519"
         "/persist/ssh"
         "/persist/secrets"
         "/persist/code-server/user-data"
         "/persist/code-server/pw"
+        "/persist/code-server/env"
         "/persist/tls"
         "/persist/github-app"
         "/persist/home"
