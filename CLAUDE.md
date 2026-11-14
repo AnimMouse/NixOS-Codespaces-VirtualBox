@@ -146,7 +146,7 @@ scripts/
 ├── gh-codespace               # container side: gh with a fresh scoped token per run
 └── codespace-kiosk.ps1        # Windows-side Firefox kiosk launcher
 docs/BOOTSTRAP.md              # the §7 sequence, for humans
-docs/GITHUB-APP.md             # scoped GitHub credentials: phases 1–3 built, 4–5 planned
+docs/GITHUB-APP.md             # scoped GitHub credentials: phases 1–5 built and verified
 docs/EDITOR-MTLS.md            # editor access by client certificate: design and tests
 .github/workflows/build-ova.yml  # PHASE 4 ONLY — stubbed
 ```

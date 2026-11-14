@@ -14,12 +14,12 @@ current. This file only covers what *changes* when the workbench moves.
 
 | | |
 |---|---|
-| HEAD at handoff | `bb6607f` — where things stood when work moved off the Codespace. `git log` for now; `main` is often ahead of `origin` |
+| HEAD at handoff | `bb6607f` — where things stood when work moved off the Codespace. `git log` for now; changes are committed straight to `main` and pushed |
 | Phases 1–3 | Done. Installed, booted, and in daily use on the VM |
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
-| nixpkgs | `nixos-26.05` pinned at `c5c4a43b0e`; disko `ff8702b4de`; home-manager `fd0956c99c` |
+| nixpkgs | `nixos-26.05` pinned at `fa1373130d` (2026-10-31: kernel 6.18.60, Docker 29.9.2); disko `cedd626e11`; home-manager `24f2190587`. Applied and rebooted into |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
-| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) **built and checked** — the VM only signs with the key; making it signing-only on GitHub waits on Windows having its own |
+| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) **built and checked** — the VM only signs with the key; making it signing-only on GitHub waits on Windows having its own. Token permissions match a real codespace's, default and maximum (§4.6) |
 | Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). In daily use; the remaining Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
@@ -43,7 +43,11 @@ row where something was learnt the hard way.
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
 | The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
-| Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only |
+| Codespaces' own permissions | launcher (`SOURCE_PERMISSIONS`, `APP_PERMISSIONS`) | defaults and ceiling probed from a real codespace's token: workflows write by default, read on CI, deployments, discussions, pages; packages read by request. The app was raised first (docs/GITHUB-APP.md §4.1) |
+| Credential clients by unit | `modules/codespace-auth.nix` | `codespace-auth-clients.service` replaces tmpfiles `C+`, which a switch never re-ran (CLAUDE.md §8) |
+| 20 codespaces | launcher, `modules/editor-proxy.nix`, `hosts/dev/configuration.nix` | ports 8001–8020; the VirtualBox forwards for 8011–8020 are added by hand |
+| `/workspaces/.persist` | `templates/devcontainer.json` | a per-codespace volume outside the checkout that a rebuild keeps; the same path survives in real Codespaces |
+| Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only; leading-dot codespace names refused; no jq error for a codespace with no repo |
 
 ### Next
 
@@ -58,7 +62,22 @@ row where something was learnt the hard way.
   Authentication keys and check `ssh -T git@github.com` is denied from the VM.
 - **The kiosk launcher** has never launched Firefox. Its profile check runs
   `firefox -P`, which may open Firefox's profile manager instead.
+- **NixOS 26.11.** 26.05 stops getting fixes around the end of December.
+  Once 26.11 has had a week or two: change both release names in `flake.nix`,
+  `nix flake update`, fix what evaluation reports, `vm build`, rebuild, reboot.
+  Leave both `stateVersion`s at `"26.05"`. Update CLAUDE.md §3 after.
+- **Lock updates within 26.05**, roughly monthly: `nix flake update`, build,
+  `vm build` for the diff, `rebuild`, and reboot when the kernel moved.
 - **Phase 4 of the build order**: the OVA in CI, untouched.
+- **No CI gate, by choice.** Considered and postponed: the build already runs
+  shellcheck, flake8 and gixy, and what has actually broken is VM runtime
+  behaviour that only `vm build` and a real `rebuild` catch, with generations
+  to roll back. If it comes back, the cheap win is unit tests for the
+  launcher's jq and the broker's planning as flake `checks`.
+- **Idea, unbuilt: signing for real Codespaces and Sprites** from a Cloudflare
+  Worker holding a separate signing-only key. Real Codespaces does not need it
+  (its GPG verification signs already); for Sprites it would need a bearer
+  secret per environment, bound to a GitHub token check.
 
 ---
 
@@ -162,6 +181,12 @@ If you touch any of these, you can now test them properly rather than by proxy.
   removed and reported by name, the checkout path was noted in
   `/persist/codespace/.removed/`, and the later `--repo` deleted exactly that
   checkout.
+
+- **The 2026-10-31 lock update**: built in the VM's store, applied and
+  rebooted into kernel 6.18.60; no failed units.
+- **`/workspaces/.persist`**: a file there survived `codespace rebuild` in a
+  throwaway codespace on the template, writable without sudo; and
+  `codespace up github.com/<you>/.github` is refused.
 
 ### Pending a real run
 
@@ -278,7 +303,8 @@ typo and watching `SC2154` stop it.
 /persist/repos/<name>/           project checkouts, one per codespace
 /persist/refs/                   reference checkouts, mounted in every container
 /persist/git/
-  id_ed25519[.pub]               one key: GitHub auth AND commit signing
+  id_ed25519[.pub]               signs commits, on the VM only; still a GitHub
+                                 authentication key while Windows uses it too
   identity                       [user] name/email — the only copy
   allowed_signers                generated from the key + identity
   known_hosts                    github.com, scanned once
@@ -293,6 +319,8 @@ typo and watching `SC2154` stop it.
                                  repositories.approved — other repositories you granted it
 /persist/code-server/           hub editor extensions and state (a leftover `pw`
                                  is no longer read — delete it)
+/persist/github-app/             the app's client_id, client_secret and refresh
+                                 token — github-app-login writes the last
 /persist/tls/                    editor CA, nginx's certificate, your browser's
                                  client.p12 + client.pass — root only
 /run/editors/<port>/             each editor's unix socket; nginx picks by port
@@ -312,7 +340,7 @@ typo and watching `SC2154` stop it.
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
 | `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
 | `GITHUB_AUTH` | `app` | no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository (and any approved in its devcontainer.json), signing on the VM (docs/GITHUB-APP.md). `legacy` forwards the agent instead. Takes effect on `codespace rebuild` |
-| `GIT_SIGNING` | `agent` | `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
+| `GIT_SIGNING` | `agent` | `legacy` only — in `app` the VM always signs. `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
 | `CONTAINER_GH_TOKEN` | `1` | set `GITHUB_TOKEN` in containers: the VM's `gh` token, or in `GITHUB_AUTH=app` a scoped one. `GH_TOKEN` is never set, so you can export your own over it |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
@@ -345,7 +373,8 @@ codespace gc [--dry-run]        # what the daily timer runs; --dry-run to previe
 ```
 
 After a VM reboot: `ssh-auth`, then `codespace up <name>` for each one you want
-back. Containers do not auto-start, and the editor proxy is not enabled at boot.
+back. Containers do not auto-start; nginx does, and answers once a codespace's
+editor is up.
 
 A codespace idle longer than `RETENTION_DAYS` (default 30) loses its *container*
 to the daily `codespace-gc.timer` — never its checkout, its port, or its URL.
@@ -391,8 +420,9 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
   references, which is the check worth trusting. Bind mounts are never
   candidates: `docker volume rm` addresses the volume namespace, not paths.
 - **`/workspaces` is not `/persist`.** Only `/workspaces/<name>` and
-  `/workspaces/refs` are mounts. Anything else there, and all of `$HOME`, dies
-  with the container. `rebuild` and `rm` warn before discarding.
+  `/workspaces/refs` are mounts, plus `/workspaces/.persist` in codespaces on
+  the template. Anything else there, and all of `$HOME` outside `~/.claude`,
+  dies with the container. `rebuild` and `rm` warn before discarding.
 - **`APT_MIRROR` cannot speed up devcontainer features, `postCreateCommand`
   or the dotfiles' `install.sh`** — features apt-install during the image
   build, and the other two run inside `devcontainer up`, all before the
