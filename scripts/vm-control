@@ -183,6 +183,11 @@ cmd_leftovers() {
       "mv /persist/codespace-secrets/* /persist/codespace/secrets/ (if any), then rmdir /persist/codespace-secrets"
   fi
 
+  if [ -e /persist/secrets ]; then
+    hit "/persist/secrets — a spare root-only directory from phase 1 that nothing ever used" \
+      "sudo ls -A /persist/secrets; if that prints nothing: sudo rmdir /persist/secrets"
+  fi
+
   # Files. -e and -L: a dangling symlink counts too.
   local kh_fix="rm /persist/git/known_hosts"
   [ "$kh_users" -gt 0 ] && kh_fix="not yet: $kh_users container(s) above still mount it, and would not start without it. Delete it once they are rebuilt"
@@ -206,10 +211,59 @@ cmd_leftovers() {
   [ -n "$newest" ] && hit "the journal still holds code-server-password entries, newest $newest — the old editor password" \
     "ages out with the journal; or sudo journalctl --rotate && sudo journalctl --vacuum-time=<age> to drop older files"
 
+  # Then everything else: whatever is on /persist that the repo neither
+  # creates nor knows about. The lists below are what is *in use*; anything
+  # outside them and not already named above is reported by name, for you to
+  # look at — it may be yours. Only the directories whose layout this repo
+  # defines are opened. The rest hold your work or another tool's (repos,
+  # refs, home, docker, dev-vm, dotfiles), or are hidden from this socket
+  # (ssh, tls, github-app, codespace/secrets).
+  local unknown
+  unknown=$(
+    unlisted /persist \
+      "codespace code-server dev-vm docker dotfiles git github-app home lost+found marker refs repos ssh tls" \
+      "secrets codespace-secrets"
+    unlisted /persist/git \
+      "id_ed25519 id_ed25519.pub identity allowed_signers" \
+      "known_hosts"
+    unlisted /persist/code-server \
+      "user-data extensions" \
+      "pw env"
+    unlisted /persist/codespace \
+      "config secrets code-server .removed .code-server-staging .code-server.lock" \
+      "cache" \
+      codespaces
+  )
+  if [ -n "$unknown" ]; then
+    hit "on /persist but not used by anything in this repo:" \
+      "look before deleting — it may be yours. If it is a feature's leftover, add it to cmd_leftovers"
+    printf '%s\n' "$unknown" | sed 's/^/         /'
+  fi
+
   if [ "$found" = 0 ]; then
-    echo "no leftovers: nothing from removed features is still on the VM"
+    echo "no leftovers: nothing from removed features, and nothing unknown, on the VM"
   fi
   return "$found"
+}
+
+# Prints each entry of $1 that is neither in use ($2) nor a leftover already
+# reported by name above ($3). With a fourth argument, a directory holding a
+# `port` file also counts as in use: that is what makes a codespace's state
+# directory, and one without it is not one.
+unlisted() {
+  local dir=$1 known=" $2 " legacy=" $3 " codespaces=${4:-} e base
+  [ -d "$dir" ] || return 0
+  for e in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    base=${e##*/}
+    case "$known$legacy" in *" $base "*) continue ;; esac
+    if [ -n "$codespaces" ] && [ -d "$e" ] && [ ! -L "$e" ]; then
+      [ -f "$e/port" ] && continue
+      echo "$e/  (no port file: not a codespace's state)"
+      continue
+    fi
+    if [ -d "$e" ] && [ ! -L "$e" ]; then echo "$e/"; else echo "$e"; fi
+  done
 }
 
 cmd_check() {

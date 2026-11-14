@@ -972,7 +972,6 @@ DEFAULT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 /persist/codespace/      per-codespace port + config, launcher config, secrets
 /persist/code-server/    hub editor extensions and state
 /persist/tls/            the editor CA, nginx's certificate, your browser's (root only)
-/persist/secrets/        anything else, mode 0700
 ```
 
 `/persist` is `neededForBoot`, so a detached `persist.vdi` is a hard boot
@@ -1131,9 +1130,12 @@ vm build                   # build with the VM's store; diff against running
 `vm leftovers` checks rather than assumes: files a removed feature left on
 `/persist`, launcher settings no longer read, containers whose mounts predate
 a change, the old editor password's journal. Names and dates only, never
-contents, each with the command that clears it; it deletes nothing. When a
-feature is removed, its leftovers get a line in `cmd_leftovers`
-(`scripts/vm-control`).
+contents, each with the command that clears it; it deletes nothing. Then it
+lists anything on `/persist` the repo does not use at all — at the top level,
+and inside the directories whose layout the repo defines (`git`,
+`code-server`, `codespace`) — for you to look at. When a feature is removed,
+its leftovers get a line in `cmd_leftovers` (`scripts/vm-control`); when one
+adds a path to `/persist`, it goes in the in-use lists there.
 
 `vm help` lists the rest. Nothing it offers changes the system — the codespace
 can write the flake, so one that could also switch would be root on the VM.

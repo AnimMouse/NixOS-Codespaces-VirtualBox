@@ -46,7 +46,6 @@
     "d /persist/home/dev     0700 dev  users -"
     # Repos checked out by hand or, from Phase 2, by the codespace launcher.
     "d /persist/repos        0755 dev  users -"
-    "d /persist/secrets      0700 root root -"
 
     # Muscle memory and any tooling that hardcodes /home/<user>.
     "d  /home                0755 root root -"

@@ -94,7 +94,6 @@ in
       PrivateNetwork = true;
       InaccessiblePaths = map (x: "-${x}") [
         "/persist/ssh"
-        "/persist/secrets"
         "/persist/tls"
         "/persist/github-app"
         "/persist/code-server"
@@ -145,7 +144,6 @@ in
       ReadWritePaths = [ p.githubAppDir stateDir ];
       InaccessiblePaths = map (x: "-${x}") [
         "/persist/ssh"
-        "/persist/secrets"
         "/persist/tls"
         "/persist/git"
         "/persist/code-server"

@@ -328,7 +328,6 @@ typo and watching `SC2154` stop it.
 /run/editors/<port>/             each editor's unix socket; nginx picks by port
 /persist/ssh/                    SSH *host* keys — the machine's identity —
                                  and authorized_keys.dev, read by sshd for key login
-/persist/secrets/                spare 0700 dir, root-owned (sudo to use it)
 /persist/docker/                 Docker data-root
 /persist/home/dev/               the dev user's home
 ```

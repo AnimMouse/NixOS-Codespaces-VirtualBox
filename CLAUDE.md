@@ -399,5 +399,7 @@ that amend the sections above:
   `search.nixos.org` for 26.05) rather than from memory. `services.code-server`
   options have shifted across releases.
 - Every module gets a comment explaining *why*, not what.
+- A new path on `/persist` goes in `cmd_leftovers`' in-use lists (`scripts/vm-control`);
+  a removed one gets a named leftover entry there, with the command that clears it.
 - If a decision in §3 looks wrong given something newly discovered, say so
   explicitly and explain the tradeoff. Don't silently substitute an alternative.

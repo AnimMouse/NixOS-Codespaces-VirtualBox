@@ -95,7 +95,6 @@ in
       InaccessiblePaths = map (x: "-${x}") [
         "/persist/git/id_ed25519"
         "/persist/ssh"
-        "/persist/secrets"
         "/persist/code-server/user-data"
         "/persist/code-server/pw"
         "/persist/code-server/env"
