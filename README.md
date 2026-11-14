@@ -390,21 +390,24 @@ codespace up refs-upstream
 ### Secrets
 
 The equivalent of Codespaces secrets. `KEY=value` lines, one per line, in
-`/persist/codespace/secrets`:
+`/persist/codespace/secrets/all` for every codespace:
 
 ```bash
-install -m 600 /dev/null /persist/codespace/secrets
-cat >> /persist/codespace/secrets <<'EOF'
+install -d -m 700 /persist/codespace/secrets
+install -m 600 /dev/null /persist/codespace/secrets/all
+cat >> /persist/codespace/secrets/all <<'EOF'
 NPM_TOKEN=npm_xxxxxxxx
 API_TOKEN=some value with spaces
 EOF
 ```
 
-Per-codespace overrides go in `/persist/codespace-secrets/<name>` and win over
-the global file. `codespace up` warns if either is readable by anyone but you.
-That directory is kept apart from `/persist/codespace/` so the VM control
-socket can be denied it whole; a file at the old path,
-`/persist/codespace/<name>/secrets`, stops `up` with the `mv` to run.
+Per-codespace overrides go in `/persist/codespace/secrets/<name>` and win over
+`all`. `codespace up` warns if a file is readable by anyone but you. One
+directory, so the VM control socket is denied all of them by one path — which
+is also why `secrets`, `all`, `config`, `code-server` and `refs` cannot be
+codespace names. Secrets at an older path (`/persist/codespace/secrets` as a
+file, `/persist/codespace/<name>/secrets`, `/persist/codespace-secrets/`) stop
+`up` with the `mv` to run; `vm leftovers` lists them.
 
 They arrive in two places, because one is not enough:
 
@@ -782,8 +785,8 @@ fine-grained PAT, limited to that owner's repositories, as `GH_TOKEN` in the
 codespace's own secrets:
 
 ```bash
-printf 'GH_TOKEN=github_pat_…\n' >> /persist/codespace-secrets/<name>
-chmod 600 /persist/codespace-secrets/<name>
+printf 'GH_TOKEN=github_pat_…\n' >> /persist/codespace/secrets/<name>
+chmod 600 /persist/codespace/secrets/<name>
 codespace up <name>      # rewrites the secrets; no rebuild
 ```
 
@@ -1089,7 +1092,7 @@ install script runs after every `up`), and stopping a container at all.
 | Dotfiles not applied, no error | The clone failed silently. Nothing in the container can authenticate it: use a public URL or `DOTFILES_REPOSITORY=/persist/dotfiles` |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
 | `codespace up` hangs at `Executing command ./install.sh...` | Something in the dotfiles install is waiting for input. The usual culprit is `ssh-keygen` on a passphrase-protected key: the tooling gives install.sh a tty, so it prompts and waits forever, and the prompt is usually swallowed. Ctrl-C, then `codespace rebuild <name>`. Keep every `ssh-keygen` in a dotfiles repo non-interactive with `-P ""` |
-| `git push` in a codespace: "the VM gave no token" for an organisation's repository | The app is not installed on that owner. Install it, or put `GH_TOKEN=<a PAT>` in `/persist/codespace-secrets/<name>` and `codespace up <name>` |
+| `git push` in a codespace: "the VM gave no token" for an organisation's repository | The app is not installed on that owner. Install it, or put `GH_TOKEN=<a PAT>` in `/persist/codespace/secrets/<name>` and `codespace up <name>` |
 | `git push` or `gh` on the VM: "the VM gave no token", or 403 | "has lapsed or was revoked": `github-app-login`. A 403 on one repository: the app is not installed on its owner (docs/GITHUB-APP.md §5), or the app lacks the permission — `gh repo create` needs Administration |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |

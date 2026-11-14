@@ -41,7 +41,7 @@ row where something was learnt the hard way.
 | Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
 | GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
-| Legacy removed | launcher, `modules/home.nix`, docs | `GITHUB_AUTH=legacy`, `GIT_SSH_MODE`, `GIT_SIGNING`, `github-known-hosts` and pre-migration container handling gone; an owner without the app gets `GH_TOKEN=<a PAT>` in `/persist/codespace-secrets/<name>` (docs/GITHUB-APP.md §8) |
+| Legacy removed | launcher, `modules/home.nix`, docs | `GITHUB_AUTH=legacy`, `GIT_SSH_MODE`, `GIT_SIGNING`, `github-known-hosts` and pre-migration container handling gone; an owner without the app gets `GH_TOKEN=<a PAT>` in `/persist/codespace/secrets/<name>` (docs/GITHUB-APP.md §8) |
 | The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Codespaces' own permissions | launcher (`SOURCE_PERMISSIONS`, `APP_PERMISSIONS`) | defaults and ceiling probed from a real codespace's token: workflows write by default, read on CI, deployments, discussions, pages; packages read by request. The app was raised first (docs/GITHUB-APP.md §4.1) |
@@ -310,14 +310,14 @@ typo and watching `SC2154` stop it.
 /persist/codespace/
   config                         launcher settings (below)
   .removed/<name>                checkout path a plain `rm` left, for a later `rm --repo`
-  secrets                        KEY=value, mode 0600
+  secrets/                       0700, hidden from the control socket as one path:
+    all                          KEY=value for every codespace, mode 0600
+    <name>                       that codespace's own, winning over `all`
   code-server/<version>/         code-server, unpacked once and mounted into every
                                  container at /mnt/code-server. Immutable (chattr +i)
   <name>/                        port, generated devcontainer.json, last_used,
                                  dotfiles.git — its own snapshot of /persist/dotfiles,
                                  repositories.approved — other repositories you granted it
-/persist/codespace-secrets/<name>  that codespace's own secrets, KEY=value, 0600 — out of
-                                 /persist/codespace so the control socket is denied them
 /persist/code-server/           hub editor extensions and state, in use (a leftover `pw`
                                  or `env` is the old password, no longer read —
                                  `vm leftovers` lists them)

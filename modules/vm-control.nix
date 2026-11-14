@@ -102,7 +102,10 @@ in
         "/persist/tls"
         "/persist/github-app"
         "/persist/home"
+        # Every secrets file the launcher reads: per codespace, and `all`.
         "/persist/codespace/secrets"
+        # Briefly the per-codespace secrets' home; hidden while `vm leftovers`
+        # reports it, until it is gone.
         "/persist/codespace-secrets"
         "/run/user"
       ];

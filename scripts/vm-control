@@ -164,14 +164,24 @@ cmd_leftovers() {
     [ -n "$why" ] && hit "codespace ${name:-?} (${id:0:12}):${why#,}" "codespace rebuild ${name:-<name>}"
   done < <(docker ps -a --filter label=codespace --format '{{.ID}} {{.Label "codespace"}}' 2>/dev/null)
 
-  # Per-codespace secrets at their old path, inside the state directory this
-  # socket can read. Names only; `up` refuses until each is moved.
+  # Secrets at old paths. Names only; `up` refuses a codespace whose secrets
+  # are still at one. The per-codespace ones sit in state directories this
+  # socket can read; the other two are hidden from it, so only their
+  # existence, and whether the old shared one is still a file, shows.
   local s cs
   for s in /persist/codespace/*/secrets; do
     [ -e "$s" ] || continue
     cs=${s%/secrets}; cs=${cs##*/}
-    hit "$s — secrets at the old path, readable through this socket" "mv $s /persist/codespace-secrets/$cs"
+    hit "$s — secrets at an old path, readable through this socket" "mv $s /persist/codespace/secrets/$cs"
   done
+  if [ -f /persist/codespace/secrets ]; then
+    hit "/persist/codespace/secrets is the old shared secrets file — now a directory, with it as secrets/all" \
+      "mv /persist/codespace/secrets /persist/codespace/secrets.all && install -d -m 0700 /persist/codespace/secrets && mv /persist/codespace/secrets.all /persist/codespace/secrets/all"
+  fi
+  if [ -e /persist/codespace-secrets ]; then
+    hit "/persist/codespace-secrets — where per-codespace secrets lived briefly" \
+      "mv /persist/codespace-secrets/* /persist/codespace/secrets/ (if any), then rmdir /persist/codespace-secrets"
+  fi
 
   # Files. -e and -L: a dangling symlink counts too.
   local kh_fix="rm /persist/git/known_hosts"

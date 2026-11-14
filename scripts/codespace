@@ -21,11 +21,17 @@ REFS=/persist/refs
 # a codespace called the same thing would land on the same path.
 REFS_NAME=refs
 STATE=/persist/codespace
-# Per-codespace secrets, one KEY=value file per codespace name. Outside $STATE
-# on purpose: the VM control socket's sandbox can hide a whole directory but
-# not a glob, and it needs the rest of $STATE to list codespaces. The global
-# file, $STATE/secrets, is hidden by name.
-SECRETS_DIR=/persist/codespace-secrets
+# Your secrets, one KEY=value file per codespace name, and $SECRETS_ALL for
+# every codespace. One directory so that one path hides them all from the VM
+# control socket's sandbox, which takes no globs and needs the rest of $STATE
+# to list codespaces. Both names are reserved as codespace names (RESERVED).
+SECRETS_DIR=$STATE/secrets
+SECRETS_ALL=$SECRETS_DIR/all
+# Names that already mean something in $STATE or in a container, so a
+# codespace called one of them would collide: the launcher's config file, the
+# secrets directory and its shared file, the shared code-server store, and the
+# reference mount at /workspaces/refs.
+RESERVED="config secrets all code-server $REFS_NAME"
 # Where `rm` without --repo notes which checkout a codespace used, so a later
 # `rm <name> --repo` deletes that checkout rather than guessing one from the
 # name. Dot-named so the `$STATE/*/` loops never mistake it for a codespace.
@@ -120,6 +126,11 @@ slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's![^a-z0-9._-]!-!g; s!
 # silently disappears from that container. Checked against the *resolved* name,
 # because a URL like github.com/someone/refs also lands on it.
 #
+# The other RESERVED names are refused because $STATE/<name> or
+# $SECRETS_DIR/<name> would land on something the launcher owns: `config`
+# is its settings file, `code-server` the immutable editor store, `secrets`
+# the secrets directory, and `all` the secrets every codespace gets.
+#
 # A leading dot is refused for the same reason and more: the template mounts
 # the codespace's own volume at /workspaces/.persist, which a checkout of that
 # name would collide with, and every `$STATE/*/` loop skips dot-names — so such
@@ -132,7 +143,12 @@ reject_reserved() {
   template's own mount, and the launcher's state keeps dot-names for itself.
   Use another name: git clone <url> $REPOS/${1#.} && codespace up ${1#.}" ;;
   esac
-  [ "$1" = "$REFS_NAME" ] || return 0
+  case " $RESERVED " in
+    *" $1 "*) ;;
+    *) return 0 ;;
+  esac
+  [ "$1" = "$REFS_NAME" ] || die "'$1' is reserved — $STATE/$1 or $SECRETS_DIR/$1 is the launcher's own.
+  Use another name: git clone <url> $REPOS/$1-something && codespace up $1-something"
   die "'$REFS_NAME' is reserved — /workspaces/$REFS_NAME is the shared reference mount.
   Use another name: git clone <url> $REPOS/${REFS_NAME}-something && codespace up ${REFS_NAME}-something
   Reference checkouts themselves go in $REFS, no codespace needed."
@@ -1300,21 +1316,29 @@ cmd_new() {
 # codespace, to reach something `docker exec` already reaches through the SSH
 # session you are sitting in.
 # Your own secrets, the way Codespaces secrets work: KEY=value lines in
-# $STATE/secrets, plus optional per-codespace overrides in $SECRETS_DIR/<name>.
+# $SECRETS_ALL, plus optional per-codespace overrides in $SECRETS_DIR/<name>.
 # Emitted as JSON for --secrets-file.
 #
 # Parsed with jq, never sourced. This is user data, and sourcing it would run
 # whatever happens to be in the file as shell.
 #
-# A file still at the old per-codespace path, $STATE/<name>/secrets, stops
-# `up` rather than being skipped: skipping it would drop a PAT without a word,
-# and reading it would keep a secret where the control socket can see it.
+# Secrets at an old path stop `up` rather than being skipped: skipping would
+# drop a PAT without a word, and reading them would keep a secret where the
+# control socket can see it. `vm leftovers` lists them too.
 collect_secrets() {
   local name="$1" f
-  if [ -e "$STATE/$name/secrets" ]; then
-    die "secrets for $name are at the old path. Move them: mv $STATE/$name/secrets $SECRETS_DIR/$name"
+  if [ -f "$SECRETS_DIR" ]; then
+    die "$SECRETS_DIR is the old shared secrets file; it is now a directory, with that file as $SECRETS_ALL:
+    mv $SECRETS_DIR $STATE/secrets.all && install -d -m 0700 $SECRETS_DIR && mv $STATE/secrets.all $SECRETS_ALL"
   fi
-  for f in "$STATE/secrets" "$SECRETS_DIR/$name"; do
+  if [ -e "$STATE/$name/secrets" ]; then
+    die "secrets for $name are at an old path. Move them: mv $STATE/$name/secrets $SECRETS_DIR/$name"
+  fi
+  if [ -e "/persist/codespace-secrets/$name" ]; then
+    die "secrets for $name are at an old path. Move them: mv /persist/codespace-secrets/$name $SECRETS_DIR/$name"
+  fi
+  [ -d "$SECRETS_DIR" ] || install -d -m 0700 "$SECRETS_DIR"
+  for f in "$SECRETS_ALL" "$SECRETS_DIR/$name"; do
     [ -r "$f" ] || continue
     # A secret readable by anyone on the VM is not much of a secret.
     case "$(stat -c %a "$f")" in
