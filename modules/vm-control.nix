@@ -103,6 +103,7 @@ in
         "/persist/github-app"
         "/persist/home"
         "/persist/codespace/secrets"
+        "/persist/codespace-secrets"
         "/run/user"
       ];
       # Long enough for a cold build of this flake, short enough that a stuck

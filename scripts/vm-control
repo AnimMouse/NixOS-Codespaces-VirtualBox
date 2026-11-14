@@ -164,6 +164,15 @@ cmd_leftovers() {
     [ -n "$why" ] && hit "codespace ${name:-?} (${id:0:12}):${why#,}" "codespace rebuild ${name:-<name>}"
   done < <(docker ps -a --filter label=codespace --format '{{.ID}} {{.Label "codespace"}}' 2>/dev/null)
 
+  # Per-codespace secrets at their old path, inside the state directory this
+  # socket can read. Names only; `up` refuses until each is moved.
+  local s cs
+  for s in /persist/codespace/*/secrets; do
+    [ -e "$s" ] || continue
+    cs=${s%/secrets}; cs=${cs##*/}
+    hit "$s — secrets at the old path, readable through this socket" "mv $s /persist/codespace-secrets/$cs"
+  done
+
   # Files. -e and -L: a dangling symlink counts too.
   local kh_fix="rm /persist/git/known_hosts"
   [ "$kh_users" -gt 0 ] && kh_fix="not yet: $kh_users container(s) above still mount it, and would not start without it. Delete it once they are rebuilt"

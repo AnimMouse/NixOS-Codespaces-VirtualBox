@@ -444,7 +444,7 @@ How:
 - **Under its own name, never `GH_TOKEN`.** `GH_TOKEN` outranks the scoped
   token in gh *and* in git's credential helper, so the whole codespace would
   push with the PAT. Put it in that codespace's
-  `/persist/codespace/<name>/secrets` (`KEY=value`, mode `0600`; it reaches
+  `/persist/codespace-secrets/<name>` (`KEY=value`, mode `0600`; it reaches
   `~/.codespace-secrets` at the next `up`, and no other codespace), and use it
   per command:
   ```bash
@@ -600,7 +600,7 @@ and `administration` on its own:
     org's Codespaces settings instead of an installation — a privilege third-
     party apps do not get.
   - For an org that will not install it: a fine-grained PAT as `GH_TOKEN` in
-    `/persist/codespace/<name>/secrets`, then `codespace up <name>` — the
+    `/persist/codespace-secrets/<name>`, then `codespace up <name>` — the
     secret Codespaces would use, and both the credential helper and the gh
     shim prefer it to the broker. Not as `GITHUB_TOKEN`: the launcher writes
     its scoped token over that name and git never reads it (`up` warns). The

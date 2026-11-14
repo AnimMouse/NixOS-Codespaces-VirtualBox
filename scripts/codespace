@@ -21,6 +21,11 @@ REFS=/persist/refs
 # a codespace called the same thing would land on the same path.
 REFS_NAME=refs
 STATE=/persist/codespace
+# Per-codespace secrets, one KEY=value file per codespace name. Outside $STATE
+# on purpose: the VM control socket's sandbox can hide a whole directory but
+# not a glob, and it needs the rest of $STATE to list codespaces. The global
+# file, $STATE/secrets, is hidden by name.
+SECRETS_DIR=/persist/codespace-secrets
 # Where `rm` without --repo notes which checkout a codespace used, so a later
 # `rm <name> --repo` deletes that checkout rather than guessing one from the
 # name. Dot-named so the `$STATE/*/` loops never mistake it for a codespace.
@@ -699,7 +704,7 @@ cmd_up() {
   # asking for legacy is refused rather than quietly given less than it expects.
   case "${GITHUB_AUTH:-app}" in
     app) ;;
-    legacy) die "GITHUB_AUTH=legacy has been removed: no SSH credential goes into a container any more. Delete it from $STATE/config. For an owner without the GitHub App, put GH_TOKEN=<a PAT> in $STATE/$name/secrets" ;;
+    legacy) die "GITHUB_AUTH=legacy has been removed: no SSH credential goes into a container any more. Delete it from $STATE/config. For an owner without the GitHub App, put GH_TOKEN=<a PAT> in $SECRETS_DIR/$name" ;;
     *) die "GITHUB_AUTH may only be app, or unset (got '$GITHUB_AUTH')" ;;
   esac
   if [ -n "${GIT_SSH_MODE:-}${GIT_SIGNING:-}" ]; then
@@ -963,7 +968,7 @@ cmd_up() {
     if [ -z "$gh_token" ] && [ -n "$token_repo" ] \
         && ! printf '%s' "$secrets_json" | jq -e 'has("GH_TOKEN")' >/dev/null 2>&1; then
       note "note: the token broker gave no token for $token_repo. If its owner has not installed"
-      note "      the GitHub App, put GH_TOKEN=<a PAT> in $STATE/$name/secrets (mode 600) and"
+      note "      the GitHub App, put GH_TOKEN=<a PAT> in $SECRETS_DIR/$name (mode 600) and"
       note "      'codespace up $name'. Otherwise: journalctl -u 'codespace-token@*' on the VM"
     fi
   fi
@@ -1295,14 +1300,21 @@ cmd_new() {
 # codespace, to reach something `docker exec` already reaches through the SSH
 # session you are sitting in.
 # Your own secrets, the way Codespaces secrets work: KEY=value lines in
-# /persist/codespace/secrets, plus optional per-codespace overrides in
-# /persist/codespace/<name>/secrets. Emitted as JSON for --secrets-file.
+# $STATE/secrets, plus optional per-codespace overrides in $SECRETS_DIR/<name>.
+# Emitted as JSON for --secrets-file.
 #
 # Parsed with jq, never sourced. This is user data, and sourcing it would run
 # whatever happens to be in the file as shell.
+#
+# A file still at the old per-codespace path, $STATE/<name>/secrets, stops
+# `up` rather than being skipped: skipping it would drop a PAT without a word,
+# and reading it would keep a secret where the control socket can see it.
 collect_secrets() {
   local name="$1" f
-  for f in "$STATE/secrets" "$STATE/$name/secrets"; do
+  if [ -e "$STATE/$name/secrets" ]; then
+    die "secrets for $name are at the old path. Move them: mv $STATE/$name/secrets $SECRETS_DIR/$name"
+  fi
+  for f in "$STATE/secrets" "$SECRETS_DIR/$name"; do
     [ -r "$f" ] || continue
     # A secret readable by anyone on the VM is not much of a secret.
     case "$(stat -c %a "$f")" in
@@ -1591,10 +1603,13 @@ cmd_rm() {
     fi
   done
 
-  # Drops the port reservation and any generated devcontainer.json, so the next
-  # `up` starts clean. The checkout is left alone unless asked: it is the one
-  # thing here that might hold work that is not pushed yet.
+  # Drops the port reservation, any generated devcontainer.json and the
+  # codespace's own secrets, so the next `up` starts clean — as removing the
+  # state directory did while the secrets lived in it. The checkout is left
+  # alone unless asked: it is the one thing here that might hold work that is
+  # not pushed yet.
   rm -rf "${STATE:?}/$name"
+  rm -f "${SECRETS_DIR:?}/$name"
 
   if [ "$keep_repo" = 0 ]; then
     remove_checkout "$name" "$ws"

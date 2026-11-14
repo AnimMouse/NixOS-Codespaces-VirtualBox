@@ -64,6 +64,10 @@ in
     # next to your project for reference just works; here only the project is a
     # mount, so this is the equivalent that survives.
     "d /persist/refs      0755 dev users -"
+    # Per-codespace secrets — PATs among them — one file per codespace. Not
+    # under /persist/codespace, so the VM control socket can be denied this
+    # whole directory while still reading the codespaces' state.
+    "d /persist/codespace-secrets 0700 dev users -"
     # The signing key, your identity and allowed_signers. Containers get the
     # public files one by one, never this directory, which holds the private
     # key. Not /persist/ssh: the host keys there are root-owned and no use to git.

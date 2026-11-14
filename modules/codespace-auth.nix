@@ -100,6 +100,7 @@ in
         "/persist/code-server"
         "/persist/home"
         "/persist/codespace"
+        "/persist/codespace-secrets"
         "/persist/repos"
         "/persist/docker"
       ];
@@ -151,6 +152,7 @@ in
         "/persist/code-server"
         "/persist/home"
         "/persist/codespace"
+        "/persist/codespace-secrets"
         "/persist/repos"
         "/persist/refs"
         "/persist/docker"
