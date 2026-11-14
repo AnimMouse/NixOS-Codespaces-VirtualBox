@@ -11,7 +11,7 @@ let
   vm-control = pkgs.writeShellApplication {
     name = "vm-control";
     runtimeInputs = with pkgs; [
-      coreutils gawk git docker systemd config.nix.package
+      coreutils gawk gnused git docker systemd config.nix.package
     ];
     text = builtins.replaceStrings
       [ "@FLAKE_DIR@" "@FLAKE_ATTR@" ]
@@ -84,11 +84,19 @@ in
       # pure mode and built in the sandbox, which already keep it from these;
       # this keeps them out of reach of the dispatcher too. `-` tolerates a
       # path that does not exist yet.
+      #
+      # Single files where the directory around them is not secret, so that
+      # `vm leftovers` can see the rest: a file hidden this way still exists,
+      # as an unreadable node, which is all that verb asks. /persist/git's
+      # other files — the public key, identity, allowed_signers — are mounted
+      # into every container already. code-server's `pw` is the old editor
+      # password, hidden until it is deleted.
       InaccessiblePaths = map (x: "-${x}") [
-        "/persist/git"
+        "/persist/git/id_ed25519"
         "/persist/ssh"
         "/persist/secrets"
-        "/persist/code-server"
+        "/persist/code-server/user-data"
+        "/persist/code-server/pw"
         "/persist/tls"
         "/persist/github-app"
         "/persist/home"

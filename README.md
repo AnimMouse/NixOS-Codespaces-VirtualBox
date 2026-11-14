@@ -1118,8 +1118,16 @@ its PATH:
 vm status                  # running vs booted system, checkout, failed units
 vm journal code-server     # also: vm unit <unit>; a fixed list of units
 vm codespaces              # codespace list --size
+vm leftovers               # anything removed features left on /persist, in config, in containers
 vm build                   # build with the VM's store; diff against running
 ```
+
+`vm leftovers` checks rather than assumes: files a removed feature left on
+`/persist`, launcher settings no longer read, containers whose mounts predate
+a change, the old editor password's journal. Names and dates only, never
+contents, each with the command that clears it; it deletes nothing. When a
+feature is removed, its leftovers get a line in `cmd_leftovers`
+(`scripts/vm-control`).
 
 `vm help` lists the rest. Nothing it offers changes the system — the codespace
 can write the flake, so one that could also switch would be root on the VM.

@@ -32,7 +32,7 @@ row where something was learnt the hard way.
 
 | What | Where | In short |
 |---|---|---|
-| VM control socket | `modules/vm-control.nix`, `scripts/vm{,-control}` | `vm status`, `vm build`, journals — read-only, for the flake's codespace |
+| VM control socket | `modules/vm-control.nix`, `scripts/vm{,-control}` | `vm status`, `vm build`, journals, `vm leftovers` — read-only, for the flake's codespace |
 | Editor access by client certificate | `modules/editor-proxy.nix`, `scripts/editor-tls` | nginx + mTLS + Fetch Metadata; editors on unix sockets with no password |
 | `--config repo\|template\|plain\|<path>` | launcher, `templates/devcontainer.json` | which devcontainer.json; the template carries gh, Node, Claude Code on a volume |
 | Shared code-server | launcher | unpacked once per version, immutable, mounted at `/mnt/code-server` |

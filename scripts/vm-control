@@ -50,6 +50,9 @@ vm — ask the VM about itself, from inside a codespace
   vm volumes              docker volume ls
   vm df                   disk usage: filesystems, then docker's own view
 
+  vm leftovers            anything still on the VM from removed features:
+                          files on /persist, config keys, old containers
+
   vm build                build the checkout with the VM's store, and say
                           what would change against the running system
   vm check                nix flake check on the checkout
@@ -108,6 +111,83 @@ cmd_build() {
   echo "==> apply on the VM with: rebuild"
 }
 
+# What removed features left behind, checked rather than assumed: each item
+# is something the repo no longer creates or reads, but a VM that ran the old
+# version may still hold. Existence and names only — never a file's contents,
+# never a config value, never a journal line. Each finding says how to clear
+# it, on the VM; nothing here deletes. Exit 1 when anything is found.
+#
+# Add an item here whenever a feature is removed, and drop it once every VM
+# that could have had it is clean.
+cmd_leftovers() {
+  local found=0
+  hit() { found=1; printf 'found: %s\n       %s\n' "$1" "$2"; }
+
+  # Files. -e and -L: a dangling symlink counts too.
+  local f
+  for f in \
+    "/persist/git/known_hosts|github-known-hosts.service wrote it for SSH git in containers; nothing reads it|rm /persist/git/known_hosts" \
+    "/persist/code-server/pw|the hub editor's password from before nginx|rm /persist/code-server/pw" \
+    "/persist/codespace/cache|code-server tarballs from before the shared store|rm -rf /persist/codespace/cache"
+  do
+    local path=${f%%|*} rest=${f#*|}
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      hit "$path — ${rest%%|*}" "${rest#*|}"
+    fi
+  done
+
+  # Launcher settings that are gone. Key names only: a value is printed by
+  # nothing here.
+  local conf=/persist/codespace/config keys
+  if [ -r "$conf" ]; then
+    keys=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?(GITHUB_AUTH|GIT_SSH_MODE|GIT_SIGNING)=.*/\2/p' "$conf" | sort -u | tr '\n' ' ')
+    [ -n "$keys" ] && hit "$conf sets ${keys% } — no longer read (GITHUB_AUTH=legacy makes up refuse)" "delete those lines"
+  fi
+
+  # Containers whose mounts predate a change. Mounts are fixed at create, so
+  # only a rebuild clears any of these.
+  local id name mounts why
+  while read -r id name; do
+    [ -n "$id" ] || continue
+    mounts=" $(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$id" 2>/dev/null) "
+    why=""
+    case "$mounts" in
+      *" /mnt/git-ssh/agent.sock "*|*" /tmp/ssh-agent.sock "*) why="$why, an SSH agent forwarded (can push anywhere)" ;;
+    esac
+    case "$mounts" in
+      *" /mnt/git-ssh "*) why="$why, the private key mounted (can push anywhere)" ;;
+    esac
+    case "$mounts" in
+      *" /mnt/git-ssh/known_hosts "*) why="$why, a known_hosts mount" ;;
+    esac
+    case "$mounts" in
+      *" /mnt/editor "*) ;;
+      *) why="$why, no editor socket (pre-nginx)" ;;
+    esac
+    case "$mounts" in
+      *" /mnt/github "*) ;;
+      *) why="$why, no credential services (cannot push or sign)" ;;
+    esac
+    case "$mounts" in
+      *" /mnt/code-server "*) ;;
+      *) why="$why, its own code-server copy" ;;
+    esac
+    [ -n "$why" ] && hit "codespace ${name:-?} (${id:0:12}):${why#,}" "codespace rebuild ${name:-<name>}"
+  done < <(docker ps -a --filter label=codespace --format '{{.ID}} {{.Label "codespace"}}' 2>/dev/null)
+
+  # The old editor password is in this unit's journal history. Only whether
+  # any entry is left, and the newest one's date — never a line of it.
+  local newest
+  newest=$(journalctl --no-pager -q -u code-server-password.service -n 1 -o short-iso 2>/dev/null | awk 'NR == 1 { print $1 }')
+  [ -n "$newest" ] && hit "the journal still holds code-server-password entries, newest $newest — the old editor password" \
+    "ages out with the journal; or sudo journalctl --rotate && sudo journalctl --vacuum-time=<age> to drop older files"
+
+  if [ "$found" = 0 ]; then
+    echo "no leftovers: nothing from removed features is still on the VM"
+  fi
+  return "$found"
+}
+
 cmd_check() {
   echo "==> nix flake check $FLAKE_DIR"
   nix flake check -L --no-write-lock-file --option accept-flake-config false "$FLAKE_DIR"
@@ -142,6 +222,7 @@ dispatch() {
     codespaces) none $# && /run/current-system/sw/bin/codespace list --size ;;
     volumes) none $# && docker volume ls ;;
     df) none $# && { df -h / /persist /nix; echo; docker system df; } ;;
+    leftovers) none $# && cmd_leftovers ;;
     build) none $# && cmd_build ;;
     check) none $# && cmd_check ;;
     *) echo "vm: unknown command '$verb'"; echo; usage; return 2 ;;
