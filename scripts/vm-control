@@ -123,19 +123,6 @@ cmd_leftovers() {
   local found=0
   hit() { found=1; printf 'found: %s\n       %s\n' "$1" "$2"; }
 
-  # Files. -e and -L: a dangling symlink counts too.
-  local f
-  for f in \
-    "/persist/git/known_hosts|github-known-hosts.service wrote it for SSH git in containers; nothing reads it|rm /persist/git/known_hosts" \
-    "/persist/code-server/pw|the hub editor's password from before nginx|rm /persist/code-server/pw" \
-    "/persist/codespace/cache|code-server tarballs from before the shared store|rm -rf /persist/codespace/cache"
-  do
-    local path=${f%%|*} rest=${f#*|}
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      hit "$path — ${rest%%|*}" "${rest#*|}"
-    fi
-  done
-
   # Launcher settings that are gone. Key names only: a value is printed by
   # nothing here.
   local conf=/persist/codespace/config keys
@@ -145,8 +132,10 @@ cmd_leftovers() {
   fi
 
   # Containers whose mounts predate a change. Mounts are fixed at create, so
-  # only a rebuild clears any of these.
-  local id name mounts why
+  # only a rebuild clears any of these. Scanned before the files, because a
+  # file still bind-mounted must not be deleted yet: docker refuses to start a
+  # container whose bind source is missing.
+  local id name mounts why kh_users=0
   while read -r id name; do
     [ -n "$id" ] || continue
     mounts=" $(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$id" 2>/dev/null) "
@@ -158,7 +147,7 @@ cmd_leftovers() {
       *" /mnt/git-ssh "*) why="$why, the private key mounted (can push anywhere)" ;;
     esac
     case "$mounts" in
-      *" /mnt/git-ssh/known_hosts "*) why="$why, a known_hosts mount" ;;
+      *" /mnt/git-ssh/known_hosts "*) why="$why, a known_hosts mount (harmless: GitHub's public host keys)"; kh_users=$((kh_users + 1)) ;;
     esac
     case "$mounts" in
       *" /mnt/editor "*) ;;
@@ -174,6 +163,21 @@ cmd_leftovers() {
     esac
     [ -n "$why" ] && hit "codespace ${name:-?} (${id:0:12}):${why#,}" "codespace rebuild ${name:-<name>}"
   done < <(docker ps -a --filter label=codespace --format '{{.ID}} {{.Label "codespace"}}' 2>/dev/null)
+
+  # Files. -e and -L: a dangling symlink counts too.
+  local kh_fix="rm /persist/git/known_hosts"
+  [ "$kh_users" -gt 0 ] && kh_fix="not yet: $kh_users container(s) above still mount it, and would not start without it. Delete it once they are rebuilt"
+  local f
+  for f in \
+    "/persist/git/known_hosts|github-known-hosts.service wrote it for SSH git in containers; nothing reads it|$kh_fix" \
+    "/persist/code-server/pw|the hub editor's password from before nginx|rm /persist/code-server/pw" \
+    "/persist/codespace/cache|code-server tarballs from before the shared store|rm -rf /persist/codespace/cache"
+  do
+    local path=${f%%|*} rest=${f#*|}
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      hit "$path — ${rest%%|*}" "${rest#*|}"
+    fi
+  done
 
   # The old editor password is in this unit's journal history. Only whether
   # any entry is left, and the newest one's date — never a line of it.
