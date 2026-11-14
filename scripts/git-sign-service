@@ -136,8 +136,7 @@ def main():
         return
 
     # Agent first: the usual case, and a passphrase-protected key works only
-    # through it. An unencrypted key file is the fallback, as GIT_SSH_MODE
-    # keyfile allows today.
+    # through it. An unencrypted key file is the fallback.
     if agent_holds_key():
         key = PUBKEY
     elif unencrypted_private_key():

@@ -1,7 +1,8 @@
 # ssh-auth — unlock the git key into the ssh-agent for this boot.
 #
-# Containers get the agent's socket, never the key, so nothing in a container
-# can prompt for a passphrase. This is the one prompt, once per boot.
+# The VM's signing service signs every codespace's commits through this agent,
+# and nothing it serves can prompt for a passphrase. This is the one prompt,
+# once per boot; until then commits in codespaces fail to sign.
 #
 # Built by modules/tools.nix with pkgs.writeShellApplication.
 
@@ -29,6 +30,3 @@ if [ -r "$KEY.pub" ]; then
 fi
 
 ssh-add "$KEY"
-echo
-echo "Containers created before now still have the old credentials."
-echo "Pick it up with:  codespace rebuild <name>"

@@ -2,8 +2,8 @@
 # gh-codespace — gh inside a codespace, with a fresh scoped token every run.
 #
 # gh reads its token once, when it starts, and a token is good for 8 hours — so
-# one left in the environment goes stale under a long-lived codespace. With
-# GITHUB_AUTH=app the launcher links /usr/local/bin/gh to this, ahead of the
+# one left in the environment goes stale under a long-lived codespace. The
+# launcher links /usr/local/bin/gh to this, ahead of the
 # real gh on PATH; it asks the VM's token broker for a token scoped to this
 # codespace's repository, then runs the real gh with it (docs/GITHUB-APP.md).
 #

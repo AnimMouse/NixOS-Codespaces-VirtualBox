@@ -64,9 +64,9 @@ in
     # next to your project for reference just works; here only the project is a
     # mount, so this is the equivalent that survives.
     "d /persist/refs      0755 dev users -"
-    # Optional: a git identity for containers to push with, when no ssh agent
-    # is being forwarded. Holds only that key — never the host keys in
-    # /persist/ssh, which are root-owned and useless for git anyway.
+    # The signing key, your identity and allowed_signers. Containers get the
+    # public files one by one, never this directory, which holds the private
+    # key. Not /persist/ssh: the host keys there are root-owned and no use to git.
     "d /persist/git       0700 dev users -"
   ];
 }

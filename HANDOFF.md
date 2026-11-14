@@ -19,7 +19,7 @@ current. This file only covers what *changes* when the workbench moves.
 | Phase 4 (OVA in CI) | Not started. `.github/workflows/build-ova.yml` is a dispatch-only stub |
 | nixpkgs | `nixos-26.05` pinned at `fa1373130d` (2026-10-31: kernel 6.18.60, Docker 29.9.2); disko `cedd626e11`; home-manager `24f2190587`. Applied and rebooted into |
 | Sibling repo | `AnimMouse/dotfiles-codespaces` — container dotfiles, also current |
-| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the default. Phase 5 (the VM itself on the app) **built and checked** — the VM only signs with the key; making it signing-only on GitHub waits on Windows having its own. Token permissions match a real codespace's, default and maximum (§4.6) |
+| GitHub credentials | [docs/GITHUB-APP.md](docs/GITHUB-APP.md): phases 1–3 **built and verified** — commit signing on the VM, a GitHub App token broker, and `GITHUB_AUTH=app` (no SSH credential in containers). Phase 4 (parity, §4.7) **built and checked on the VM**, two edges open; `app` is now the only mode — legacy removed. Phase 5 (the VM itself on the app) **built and checked** — the VM only signs with the key; making it signing-only on GitHub waits on Windows having its own. Token permissions match a real codespace's, default and maximum (§4.6) |
 | Editor access | By client certificate, through nginx — [docs/EDITOR-MTLS.md](docs/EDITOR-MTLS.md). In daily use; the remaining Firefox checks are its §5 |
 
 **Nothing in this repo is personal.** Your name, email and keys live on
@@ -41,6 +41,7 @@ row where something was learnt the hard way.
 | Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
 | GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
+| Legacy removed | launcher, `modules/home.nix`, docs | `GITHUB_AUTH=legacy`, `GIT_SSH_MODE`, `GIT_SIGNING`, `github-known-hosts` and pre-migration container handling gone; an owner without the app gets `GH_TOKEN=<a PAT>` in `/persist/codespace/<name>/secrets` (docs/GITHUB-APP.md §8) |
 | The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Codespaces' own permissions | launcher (`SOURCE_PERMISSIONS`, `APP_PERMISSIONS`) | defaults and ceiling probed from a real codespace's token: workflows write by default, read on CI, deployments, discussions, pages; packages read by request. The app was raised first (docs/GITHUB-APP.md §4.1) |
@@ -54,8 +55,7 @@ row where something was learnt the hard way.
 - **Phase 4 of the GitHub App plan — two edges left**: whether a revoked
   scoped token is really dead (the broker now logs 204 apart from 404), and
   read-only planning against an organisation repository you can only read.
-  docs/GITHUB-APP.md §4.7. Any codespace still on an agent needs
-  `codespace rebuild` now that `app` is the default.
+  docs/GITHUB-APP.md §4.7.
 - **The key's last authentication role** (GitHub App phase 5): Git Bash on the
   Windows host logs in with the same key, so it is still an authentication key
   on GitHub. Give Windows its own key, then delete this one from GitHub's
@@ -307,7 +307,6 @@ typo and watching `SC2154` stop it.
                                  authentication key while Windows uses it too
   identity                       [user] name/email — the only copy
   allowed_signers                generated from the key + identity
-  known_hosts                    github.com, scanned once
 /persist/codespace/
   config                         launcher settings (below)
   .removed/<name>                checkout path a plain `rm` left, for a later `rm --repo`
@@ -338,10 +337,7 @@ typo and watching `SC2154` stop it.
 | `DOTFILES_REPOSITORY` | — | a URL, cloned inside the container; or a git repo on the VM such as `/persist/dotfiles`, snapshotted per codespace and mounted at `/mnt/dotfiles` |
 | `DOTFILES_INSTALL_COMMAND` | — | optional: the CLI already runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` at the repo's root |
 | `DEFAULT_IMAGE` | `mcr.microsoft.com/devcontainers/base:ubuntu26.04` | for `--config plain` |
-| `GIT_SSH_MODE` | `auto` | `auto` \| `agent` \| `keyfile` \| `none` |
-| `GITHUB_AUTH` | `app` | no SSH credential in containers; git and `gh` use tokens scoped to the codespace's repository (and any approved in its devcontainer.json), signing on the VM (docs/GITHUB-APP.md). `legacy` forwards the agent instead. Takes effect on `codespace rebuild` |
-| `GIT_SIGNING` | `agent` | `legacy` only — in `app` the VM always signs. `vm` signs commits on the VM (`modules/codespace-auth.nix`) instead of through the forwarded agent. Chosen on every `up` |
-| `CONTAINER_GH_TOKEN` | `1` | set `GITHUB_TOKEN` in containers: the VM's `gh` token, or in `GITHUB_AUTH=app` a scoped one. `GH_TOKEN` is never set, so you can export your own over it |
+| `CONTAINER_GH_TOKEN` | `1` | set `GITHUB_TOKEN` in containers to the scoped token. `GH_TOKEN` is never set, so yours — exported, or in the codespace's secrets — outranks it |
 | `CONTAINER_REFS` | `1` | mount `/persist/refs` |
 | `APT_MIRROR` | — | rewrite apt sources in containers; no `apt-get update` — run it before your first install |
 | `RETENTION_DAYS` | `30` | days idle before `codespace gc` removes the container; `0` disables |

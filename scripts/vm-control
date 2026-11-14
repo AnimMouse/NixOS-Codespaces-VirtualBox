@@ -27,7 +27,7 @@ allowed_unit() {
     code-server-password*|editor-tls*) return 1 ;;
     code-server|code-server.service|nginx|nginx.service) ;;
     codespace-gc|codespace-gc.service|codespace-gc.timer) ;;
-    git-allowed-signers*|git-identity-template*|github-known-hosts*) ;;
+    git-allowed-signers*|git-identity-template*) ;;
     # The credential services log repositories, permissions, expiries and
     # revocations — never a token, which is what makes them readable here.
     codespace-auth-clients*|codespace-token*|codespace-sign*) ;;

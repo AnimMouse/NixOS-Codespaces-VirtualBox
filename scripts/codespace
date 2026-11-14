@@ -33,7 +33,7 @@ CS_STAGING=/persist/codespace/.code-server-staging
 CS_LOCK=/persist/codespace/.code-server.lock
 CONTAINER_CS=/mnt/code-server
 # Credential services on the VM (modules/codespace-auth.nix): commit signing
-# now, scoped GitHub tokens later. One directory for every codespace.
+# and scoped GitHub tokens. One directory for every codespace.
 AUTH_DIR=/run/codespace-auth
 CONTAINER_AUTH=/mnt/github
 # What each container may ask the token broker for, keyed by container ID
@@ -684,161 +684,58 @@ cmd_up() {
     args+=(--override-config "$override" --no-lockfile)
   fi
 
-  # Git credentials inside the container (CLAUDE.md §8).
+  # Git credentials inside the container (CLAUDE.md §8): none. No SSH key or
+  # agent reaches a container in any form. An ssh-agent cannot tell signing
+  # from logging in, so a forwarded one let a container push to every
+  # repository the key could. Instead git pushes over https with a token scoped
+  # to this codespace's repository, from the VM's broker, and commits are
+  # signed on the VM (docs/GITHUB-APP.md).
   #
-  # A key file under /persist/git is tried first because its path is stable.
-  # Agent forwarding leaks no key at all and would otherwise be the better
-  # option, but $SSH_AUTH_SOCK points at a per-session directory: a container
-  # created during one SSH session holds a bind mount to a socket that is dead
-  # by the next login, and git then fails in a way that looks like a key
-  # problem. So it is the fallback, not the default.
+  # An owner that has not installed the app gets no token. The fallback is the
+  # one real Codespaces has: a PAT as GH_TOKEN in this codespace's secrets,
+  # which the credential helper and the gh shim both prefer to the broker.
   #
-  # Neither mount can be read-only: the CLI validates --mount strictly as
-  # type/source/target/external and rejects `readonly`. /persist/git limits the
-  # exposure to one key, rather than all of ~/.ssh or the host keys.
-  # Glob into an array rather than `compgen -G`: nixpkgs builds bash without
-  # programmable completion, so compgen does not exist and the test silently
-  # takes the wrong branch. With nullglob unset, a pattern that matches nothing
-  # survives literally and fails -e.
-  local git_want="" ssh_cmd="" key=/persist/git/id_ed25519
-  local have_key=0 key_locked=0 have_agent=0 agent_sock=/mnt/git-ssh/agent.sock
-
-  [ -r "$key" ] && have_key=1
-  # An encrypted key is still perfectly readable — it just cannot be *used*
-  # without a passphrase, and a container has no terminal to ask at. Detect it
-  # up front rather than letting ssh fail with a message that looks exactly
-  # like an unregistered key.
-  if [ "$have_key" = 1 ] && ! ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
-    key_locked=1
-  fi
-  # `ssh-add -l` exits non-zero both when the agent is unreachable and when it
-  # holds nothing, which are the same thing for our purposes.
-  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then
-    have_agent=1
-  fi
-
-  # GIT_SSH_MODE in /persist/codespace/config, one of:
-  #
-  #   auto     (default) agent if one is loaded, else an unencrypted key file
-  #   agent    require the agent — fail rather than quietly exposing the key
-  #   keyfile  require the key file
-  #   none     no git credentials in containers at all
-  #
-  # `auto` is convenient but it downgrades silently: forget to `ssh-add` and it
-  # mounts the private key instead, which is the opposite of what someone who
-  # cares would want. `agent` makes that a hard error.
-  local mode="${GIT_SSH_MODE:-auto}"
-  case "$mode" in
-    auto|agent|keyfile|none) ;;
-    *) die "GIT_SSH_MODE must be auto, agent, keyfile or none (got '$mode')" ;;
+  # GITHUB_AUTH=legacy, GIT_SSH_MODE and GIT_SIGNING are gone. A config still
+  # asking for legacy is refused rather than quietly given less than it expects.
+  case "${GITHUB_AUTH:-app}" in
+    app) ;;
+    legacy) die "GITHUB_AUTH=legacy has been removed: no SSH credential goes into a container any more. Delete it from $STATE/config. For an owner without the GitHub App, put GH_TOKEN=<a PAT> in $STATE/$name/secrets" ;;
+    *) die "GITHUB_AUTH may only be app, or unset (got '$GITHUB_AUTH')" ;;
   esac
-
-  # GITHUB_AUTH=app (docs/GITHUB-APP.md, phase 3): no SSH credential reaches
-  # the container in any form. An ssh-agent cannot tell signing from logging
-  # in, so a forwarded agent lets a container push to every repository; here
-  # git pushes over https with a token scoped to this codespace's repository,
-  # from the VM's broker, and commits are signed on the VM. The default since
-  # phase 4. legacy is everything below as it was: the agent or key forwarded,
-  # reaching every repository the key can.
-  local gh_auth="${GITHUB_AUTH:-app}" granted='{}'
-  case "$gh_auth" in
-    legacy) ;;
-    app)
-      [ -S "$AUTH_DIR/token.sock" ] \
-        || die "GITHUB_AUTH=app, but the token broker is not running ($AUTH_DIR/token.sock) — is modules/codespace-auth.nix applied?"
-      # Not fatal: the codespace still comes up, signs, and reads public
-      # repositories — but nothing in it can push until the VM is authorised.
-      # Better than quietly handing it the SSH key instead.
-      if [ ! -s "$GITHUB_APP_DIR/refresh_token" ]; then
-        note "warning: the GitHub App is not authorised on this VM yet, so git and gh in"
-        note "         this codespace cannot authenticate. Run: github-app-login"
-        note "         (docs/GITHUB-APP.md §4.1 to register the app first; GITHUB_AUTH=legacy for the old way)"
-      fi
-      # Asked before the build, which can take minutes, rather than after.
-      granted=$(requested_repositories "$ws" "$override" "$(github_repo "$ws")")
-      [ "$granted" = '{}' ] || granted=$(granted_repositories "$name" "$granted")
-      case "$mode" in
-        auto|none) ;;
-        *) note "note: GITHUB_AUTH=app — ignoring GIT_SSH_MODE=$mode; no SSH credential goes into a container" ;;
-      esac
-      mode=none
-      ;;
-    *) die "GITHUB_AUTH must be legacy or app (got '$gh_auth')" ;;
-  esac
-
-  if [ "$mode" = agent ] || { [ "$mode" = auto ] && [ "$have_agent" = 1 ]; }; then
-    if [ "$have_agent" != 1 ]; then
-      die "GIT_SSH_MODE=agent, but no ssh-agent is holding a key. Run: ssh-add $key or ssh-auth"
-    fi
-    # A passphrase-protected key works without anything to prompt at, and the
-    # crypto happens back on the VM.
-    #
-    # Under /mnt/git-ssh with the rest of git's credentials, not in /tmp: the
-    # docker-in-docker entrypoint mounts a tmpfs over /tmp, which hid the socket
-    # while `docker inspect` still listed it. Nothing claims /mnt.
-    #
-    # Only safe because this mode never mounts the /persist/git directory at
-    # /mnt/git-ssh. If both ever coexist, docker creates this mount point
-    # inside /persist/git on the VM.
-    args+=(--mount "type=bind,source=$SSH_AUTH_SOCK,target=$agent_sock")
-    # A container from before the move keeps /tmp/ssh-agent.sock: `up` reuses
-    # it and ignores changed mounts. Match it, so --remote-env below names a
-    # socket that exists. A rebuild removes it first, so gets the new path.
-    local existing
-    existing=$(container_any "$name")
-    if [ "$recreate" != recreate ] && [ -n "$existing" ]; then
-      case " $(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$existing") " in
-        *" /tmp/ssh-agent.sock "*) agent_sock=/tmp/ssh-agent.sock ;;
-      esac
-    fi
-    git_want="agent"
-    ssh_cmd="ssh"
-  elif [ "$mode" = keyfile ] || { [ "$mode" = auto ] && [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; }; then
-    if [ "$have_key" != 1 ]; then
-      die "GIT_SSH_MODE=keyfile, but there is no key at $key"
-    fi
-    if [ "$key_locked" = 1 ]; then
-      die "GIT_SSH_MODE=keyfile, but $key has a passphrase and nothing in a container can enter it. Use GIT_SSH_MODE=agent."
-    fi
-    git_want="keyfile"
-    ssh_cmd="ssh -i /mnt/git-ssh/id_ed25519 -o IdentitiesOnly=yes"
-  elif [ "$mode" = auto ] && [ "$key_locked" = 1 ]; then
-    note "warning: $key has a passphrase and no ssh-agent is holding it."
-    note "         Containers cannot prompt, so git inside this one will fail"
-    note "         with 'Permission denied (publickey)'. Unlock it with:"
-    note "             ssh-add $key"
-    note "         then: codespace rebuild $name"
+  if [ -n "${GIT_SSH_MODE:-}${GIT_SIGNING:-}" ]; then
+    note "note: GIT_SSH_MODE and GIT_SIGNING are no longer read — delete them from $STATE/config"
   fi
+  local key=/persist/git/id_ed25519 granted='{}'
+  [ -S "$AUTH_DIR/token.sock" ] \
+    || die "the token broker is not running ($AUTH_DIR/token.sock) — is modules/codespace-auth.nix applied?"
+  # Not fatal: the codespace still comes up, signs, and reads public
+  # repositories — but nothing in it can push until the VM is authorised.
+  if [ ! -s "$GITHUB_APP_DIR/refresh_token" ]; then
+    note "warning: the GitHub App is not authorised on this VM yet, so git and gh in"
+    note "         this codespace cannot authenticate. Run: github-app-login"
+    note "         (docs/GITHUB-APP.md §4.1 to register the app first)"
+  fi
+  # Asked before the build, which can take minutes, rather than after.
+  granted=$(requested_repositories "$ws" "$override" "$(github_repo "$ws")")
+  [ "$granted" = '{}' ] || granted=$(granted_repositories "$name" "$granted")
 
-  # How much of /persist/git the container can see. Only the key-file mode has
-  # any use for the private key, so only that mode gets the directory. Every
-  # other mode gets the public half and known_hosts as individual file mounts —
-  # the container needs the .pub to configure signing (the agent does the
-  # crypto) and known_hosts to verify github, and neither is secret.
+  # What the container needs of /persist/git, as single files — never the
+  # directory, which holds the private key: the public half, which names the
+  # key the VM signs with; your identity, so a container authors commits as
+  # the VM does; allowed_signers, so `git log --show-signature` can verify.
+  # None of it is secret.
   #
-  # Mounting the whole directory unconditionally, as this did until now, put the
-  # private key inside every container even when nothing there could use it.
-  local have_known_hosts=0
-  if [ "$git_want" = keyfile ]; then
-    args+=(--mount "type=bind,source=/persist/git,target=/mnt/git-ssh")
-    [ -r /persist/git/known_hosts ] && have_known_hosts=1
-  else
-    # Guarded: docker silently creates a *directory* at a bind source that does
-    # not exist, which would litter /persist/git and mount the wrong thing.
-    [ -r "$key.pub" ] && \
-      args+=(--mount "type=bind,source=$key.pub,target=/mnt/git-ssh/id_ed25519.pub")
-    # Your name and email, so a container authors commits as the same person the
-    # VM does. Not secret, and the same file either way.
-    [ -r /persist/git/identity ] && \
-      args+=(--mount "type=bind,source=/persist/git/identity,target=/mnt/git-ssh/identity")
-    [ -r /persist/git/allowed_signers ] && \
-      args+=(--mount "type=bind,source=/persist/git/allowed_signers,target=/mnt/git-ssh/allowed_signers")
-    if [ -r /persist/git/known_hosts ]; then
-      args+=(--mount "type=bind,source=/persist/git/known_hosts,target=/mnt/git-ssh/known_hosts")
-      have_known_hosts=1
-    fi
+  # Guarded: docker silently creates a *directory* at a bind source that does
+  # not exist, which would litter /persist/git and mount the wrong thing.
+  if [ -r "$key.pub" ]; then
+    args+=(--mount "type=bind,source=$key.pub,target=/mnt/git-ssh/id_ed25519.pub")
   fi
-
+  if [ -r /persist/git/identity ]; then
+    args+=(--mount "type=bind,source=/persist/git/identity,target=/mnt/git-ssh/identity")
+  fi
+  if [ -r /persist/git/allowed_signers ]; then
+    args+=(--mount "type=bind,source=/persist/git/allowed_signers,target=/mnt/git-ssh/allowed_signers")
+  fi
   # Create-time secrets: --secrets-file reaches the user commands that run
   # during `up`, including the dotfiles install — which is where a Codespaces
   # secret like $SSH_ANIMMOZ_KEY is expected. It takes a path, so nothing lands
@@ -846,6 +743,14 @@ cmd_up() {
   # container, which is handled separately after `up`.
   local secrets_json secrets_file=""
   secrets_json=$(collect_secrets "$name")
+  # GITHUB_TOKEN is the launcher's: it is written over below, and the
+  # credential helper never reads it, so a PAT saved under that name reaches
+  # gh by luck and git not at all. Real Codespaces refuses secrets named
+  # GITHUB_* outright; GH_TOKEN is the name both tools prefer.
+  if printf '%s' "$secrets_json" | jq -e 'has("GITHUB_TOKEN")' >/dev/null 2>&1; then
+    note "warning: GITHUB_TOKEN in a secrets file is replaced by the scoped token, and git"
+    note "         never reads it. Rename it GH_TOKEN — git and gh both prefer that one."
+  fi
   if [ -n "$secrets_json" ] && [ "$secrets_json" != "{}" ]; then
     secrets_file=$(mktemp)
     chmod 600 "$secrets_file"
@@ -872,14 +777,11 @@ cmd_up() {
   fi
   args+=(--mount "type=bind,source=$CS_STORE,target=$CONTAINER_CS")
 
-  # The credential services' directory, in every new container whatever
-  # GIT_SIGNING says now, so switching it later needs no rebuild. It grants
-  # nothing a container does not already have: getting commits signed is what
-  # the forwarded agent allows today, and more.
+  # The credential services' directory: commit signing and scoped tokens, the
+  # only way anything in a container reaches GitHub as you.
   if [ -d "$AUTH_DIR" ]; then
     args+=(--mount "type=bind,source=$AUTH_DIR,target=$CONTAINER_AUTH")
   fi
-
   # The VM control socket: read-only questions about the VM, and builds in its
   # store, for the codespaces allowed them (vm_control_for). The directory, not
   # the socket, so a restart of the socket unit does not strand the container
@@ -908,26 +810,11 @@ cmd_up() {
     fi
   fi
 
-  # The dotfiles clone runs *inside* the container, before anything this script
-  # writes there exists — so a private dotfiles repo over https fails with
-  # "could not read Username", and `up` still reports success, leaving the
-  # dotfiles silently unapplied.
+  # The dotfiles clone runs *inside* the container, before any credential this
+  # script sets up exists, so a private repository cannot be cloned from
+  # GitHub — and `up` still reports success, leaving the dotfiles silently
+  # unapplied. Hence a repository on the VM, below, or a public URL.
   #
-  # --remote-env does reach that clone, so hand it the mounted key and rewrite
-  # github https URLs to SSH. This makes DOTFILES_REPOSITORY work as either an
-  # https or an ssh URL, private or not.
-  if [ -n "$ssh_cmd" ]; then
-    if [ "$have_known_hosts" = 1 ]; then
-      ssh_cmd="$ssh_cmd -o UserKnownHostsFile=/mnt/git-ssh/known_hosts"
-    fi
-    ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=accept-new"
-    args+=(--remote-env "GIT_SSH_COMMAND=$ssh_cmd")
-    [ "$git_want" = agent ] && args+=(--remote-env "SSH_AUTH_SOCK=$agent_sock")
-    args+=(--remote-env "GIT_CONFIG_COUNT=1")
-    args+=(--remote-env "GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf")
-    args+=(--remote-env "GIT_CONFIG_VALUE_0=https://github.com/")
-  fi
-
   # DOTFILES_REPOSITORY is a URL for the CLI to clone inside the container —
   # or a git repository on the VM, such as /persist/dotfiles. That one is
   # snapshotted for this codespace (snapshot_dotfiles) and mounted at
@@ -983,39 +870,21 @@ cmd_up() {
   echo "$remote_ws" > "$STATE/$name/remote_workspace"
   touch_used "$name"
 
-  # What the container actually has, not what the host happened to offer. `up`
-  # reuses an existing container and silently ignores changed --mount flags, so
-  # trusting git_want here would configure the editor for a mount that is not
-  # there.
-  local mounts git_ssh=""
+  # What the container actually has, not what this run asked for: `up` reuses
+  # an existing container and silently ignores changed --mount flags.
+  local mounts
   mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$cid")
+  # A container created before GITHUB_AUTH=legacy was removed may still hold
+  # the agent or the key, and mounts are fixed at create: anything in it can
+  # push to every repository the key can. Said loudly; git itself is still
+  # configured the scoped way below.
   case " $mounts " in
-    # Either path: containers created before the socket moved out of /tmp keep
-    # it there until rebuilt. Everything after uses the one actually mounted.
-    *" /mnt/git-ssh/agent.sock "*) git_ssh="agent"; agent_sock=/mnt/git-ssh/agent.sock ;;
-    *" /tmp/ssh-agent.sock "*)     git_ssh="agent"; agent_sock=/tmp/ssh-agent.sock ;;
-    # The whole directory, so the private key is there and usable.
-    *" /mnt/git-ssh "*)        git_ssh="keyfile" ;;
-    # Only the public half — no way to authenticate from in here. Every app
-    # mode container is like this, for verifying signatures; in legacy it
-    # means the key was locked, or GIT_SSH_MODE=none, when it was created.
-    *" /mnt/git-ssh/id_ed25519.pub "*) git_ssh="pubkey" ;;
+    *" /mnt/git-ssh/agent.sock "*|*" /tmp/ssh-agent.sock "*|*" /mnt/git-ssh "*)
+      note "WARNING: this container was created with an SSH credential mounted, and mounts"
+      note "         are fixed at create: anything in it can still push to every repository."
+      note "         'codespace rebuild $name' removes it."
+      ;;
   esac
-  if [ -n "$git_want" ] && [ "$git_want" != "$git_ssh" ] && [ "$git_ssh" != pubkey ]; then
-    note "note: this container was created with git credentials '${git_ssh:-none}';"
-    note "      '$git_want' is available now — 'codespace rebuild $name' to switch"
-  fi
-  # Mounts are fixed at create, so a container made before GITHUB_AUTH=app
-  # still has the agent or key it was given — and can still push anywhere,
-  # whatever is configured below. Said loudly, then treated as app anyway, so
-  # at least git itself goes the scoped way.
-  if [ "$gh_auth" = app ] && { [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; }; then
-    note "WARNING: GITHUB_AUTH=app, but this container was created with an SSH credential"
-    note "         ($git_ssh) mounted, and mounts are fixed at create: anything in it can"
-    note "         still push to every repository. 'codespace rebuild $name' removes it."
-    git_ssh=""
-  fi
-
   # What this container may ask the token broker for. Written here, early,
   # because GITHUB_TOKEN below is fetched through the broker in app mode.
   local token_repo
@@ -1075,38 +944,29 @@ cmd_up() {
   esac
 
   # Real Codespaces injects GITHUB_TOKEN so `gh` works inside the container
-  # without a second login. Nothing does that here, so hand the container the
-  # VM's own gh token. Read at `up` time — after `gh auth login` or a token
-  # change, `codespace up` again to refresh it. Set CONTAINER_GH_TOKEN=0 in
-  # /persist/codespace/config to keep the token on the VM instead.
+  # without a second login. Here it comes from the broker, scoped to this
+  # codespace's repository. Asked from inside the container, because the
+  # broker knows callers by their container and would hand the VM its
+  # account-wide token. It lapses in 8 hours; the gh shim and the credential
+  # helper fetch a fresh one per run, and login shells refresh the variable,
+  # so this only seeds it. CONTAINER_GH_TOKEN=0 leaves it unset.
   #
-  # In app mode the token comes from the broker instead — scoped to this
-  # codespace's repository, not the VM's account-wide one. Asked from inside
-  # the container, because the broker knows callers by their container and
-  # would hand the VM its account-wide token. It lapses in 8 hours; the gh shim below fetches a
-  # fresh one per run, so this only serves tools that read the variable
-  # themselves.
-  #
-  # As GITHUB_TOKEN, the name real Codespaces uses, and never GH_TOKEN: gh
-  # prefers GH_TOKEN, so that name is left to you. `export GH_TOKEN=<a PAT>`
-  # in a codespace lifts both gh and git (the credential helper honours it) to
-  # whatever the PAT can do, and `unset GH_TOKEN` drops back — the same move as
-  # in a real Codespace.
+  # Never GH_TOKEN: gh prefers it, and the credential helper honours it, so
+  # that name is yours — a PAT in this codespace's secrets, or exported in a
+  # shell, lifts both git and gh to whatever it can do, and `unset GH_TOKEN`
+  # drops back. The same move as in a real Codespace, and the way to reach an
+  # owner that has not installed the app.
   local gh_token=""
   if [ "${CONTAINER_GH_TOKEN:-1}" != 0 ]; then
-    if [ "$gh_auth" = app ]; then
-      gh_token=$(docker exec -u "$remote_user" "$cid" \
-        curl -fsS --unix-socket "$CONTAINER_AUTH/token.sock" http://vm/token 2>/dev/null | tr -d '\r\n' || true)
-      [ -n "$gh_token" ] || [ -z "$token_repo" ] \
-        || note "note: the token broker gave no token for $token_repo — see journalctl -u 'codespace-token@*' on the VM"
-    else
-      # The VM's account-wide token: from the broker since phase 5, which
-      # answers the VM with it, else whatever `gh auth login` stored.
-      gh_token=$(curl -fsS --unix-socket "$AUTH_DIR/token.sock" http://vm/token 2>/dev/null | tr -d '\r\n' || true)
-      [ -n "$gh_token" ] || gh_token=$(gh auth token 2>/dev/null || true)
+    gh_token=$(docker exec -u "$remote_user" "$cid" \
+      curl -fsS --unix-socket "$CONTAINER_AUTH/token.sock" http://vm/token 2>/dev/null | tr -d '\r\n' || true)
+    if [ -z "$gh_token" ] && [ -n "$token_repo" ] \
+        && ! printf '%s' "$secrets_json" | jq -e 'has("GH_TOKEN")' >/dev/null 2>&1; then
+      note "note: the token broker gave no token for $token_repo. If its owner has not installed"
+      note "      the GitHub App, put GH_TOKEN=<a PAT> in $STATE/$name/secrets (mode 600) and"
+      note "      'codespace up $name'. Otherwise: journalctl -u 'codespace-token@*' on the VM"
     fi
   fi
-
   local remote_home
   remote_home=$(docker exec -u "$remote_user" "$cid" sh -c 'echo $HOME' 2>/dev/null | tr -d '\r')
   [ -n "$remote_home" ] || remote_home="/home/$remote_user"
@@ -1136,77 +996,40 @@ cmd_up() {
     docker exec -u root "$cid" rm -f "$secretfile" 2>/dev/null || true
   fi
   rm -f "$tmpsec"
-  # Superseded by .codespace-secrets; clear it so an old one cannot linger.
-  docker exec -u root "$cid" rm -f "$remote_home/.codespace-token" 2>/dev/null || true
 
   # Commit signing, at the container's system level for the same reason as the
-  # identity: it should not depend on having a dotfiles repo. The launcher has
-  # already worked out whether a usable key is reachable and how, so it writes
-  # the answer rather than making something downstream re-derive it and risk
-  # disagreeing.
+  # identity: it should not depend on having a dotfiles repo. On the VM
+  # (modules/codespace-auth.nix): git runs the mounted client as
+  # gpg.ssh.program, and the key and its agent are never in the container.
+  # user.signingkey is the *public* half, naming which key the VM uses.
   #
-  # user.signingkey is the *public* half: `ssh-keygen -Y sign` uses the agent
-  # when the private half is unreadable, which is the whole point of agent mode.
-  #
-  # GIT_SIGNING=vm signs on the VM instead (modules/codespace-auth.nix): git
-  # runs the mounted client as gpg.ssh.program, and the key and its agent need
-  # not be in the container at all. That is what lets the agent stop being
-  # forwarded later (docs/GITHUB-APP.md). Chosen on every `up`, so switching
-  # needs no rebuild — only a container created with the mount.
-  local signing="" have_auth=0
+  # Then git over https, asking the broker for its password:
+  #  - credential helper for https://github.com only, reset first so nothing
+  #    configured before it is consulted;
+  #  - SSH remote URLs rewritten to https: a checkout is shared with the VM, so
+  #    one cloned as git@github.com:… has that URL here too, where no SSH key
+  #    exists. The VM and the checkout's own .git/config are untouched;
+  #  - /usr/local/bin/gh linked to the shim, ahead of the real gh on PATH, but
+  #    only where a real gh exists elsewhere — never over one installed there.
+  local signing="" have_auth=0 gh_shim=0 rc=0
   case " $mounts " in *" $CONTAINER_AUTH "*) have_auth=1 ;; esac
-  local sign_mode="${GIT_SIGNING:-agent}"
-  # No agent to sign with in app mode: the VM signs, whatever GIT_SIGNING says.
-  [ "$gh_auth" = app ] && sign_mode=vm
-  case "$sign_mode" in
-    vm)
-      if [ "$have_auth" = 1 ]; then
-        signing=vm
-      else
-        note "note: signing on the VM, but this container predates the signing service — 'codespace rebuild $name'"
-      fi
-      ;;
-    agent) ;;
-    *) die "GIT_SIGNING must be agent or vm (got '${GIT_SIGNING}')" ;;
-  esac
-  if [ -z "$signing" ] && { [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; }; then
-    signing=key
-  fi
-
-  if [ -n "$signing" ]; then
+  if [ "$have_auth" = 1 ]; then
+    signing=vm
     docker exec -u root "$cid" sh -c '
       set -e
       git config --system gpg.format ssh
       git config --system user.signingkey /mnt/git-ssh/id_ed25519.pub
       git config --system commit.gpgsign true
       git config --system tag.gpgsign true
-      [ -r /mnt/git-ssh/allowed_signers ]         && git config --system gpg.ssh.allowedSignersFile /mnt/git-ssh/allowed_signers
-      if [ "$1" = vm ]; then
-        git config --system gpg.ssh.program "$2/git-sign-codespace"
-      else
-        git config --system --unset-all gpg.ssh.program || true
-      fi
+      [ -r /mnt/git-ssh/allowed_signers ] && git config --system gpg.ssh.allowedSignersFile /mnt/git-ssh/allowed_signers
+      git config --system gpg.ssh.program "$1/git-sign-codespace"
       exit 0
-    ' _ "$signing" "$CONTAINER_AUTH" 2>/dev/null || note "note: could not set container git signing config"
-  fi
+    ' _ "$CONTAINER_AUTH" 2>/dev/null || note "note: could not set container git signing config"
 
-  # App mode: git goes over https, and asks the broker for its password.
-  #  - credential helper for https://github.com only, reset first so nothing
-  #    configured before it is consulted;
-  #  - SSH remote URLs rewritten to https: a checkout is shared with the VM, so
-  #    one cloned as git@github.com:… has that URL here too, where no SSH key
-  #    exists. The VM and the checkout's own .git/config are untouched;
-  #  - the legacy https→SSH rewrite removed;
-  #  - /usr/local/bin/gh linked to the shim, ahead of the real gh on PATH, but
-  #    only where a real gh exists elsewhere — never over one installed there.
-  # Legacy mode undoes all of it, so switching back needs no rebuild.
-  local gh_shim=0 rc=0
-  if [ "$gh_auth" = app ] && [ "$have_auth" = 1 ]; then
     # `|| rc=$?`, not a bare command and `$?`: the script runs under set -e,
     # and exit 3 below — "shim linked" — would otherwise end the whole `up`.
     docker exec -u root "$cid" sh -c '
       a=$1
-      git config --system --unset-all url.git@github.com:.insteadOf 2>/dev/null
       git config --system --replace-all credential.https://github.com.helper "" || exit 1
       git config --system --add credential.https://github.com.helper "$a/git-credential-codespace" || exit 1
       git config --system credential.https://github.com.useHttpPath true || exit 1
@@ -1231,31 +1054,14 @@ cmd_up() {
     ssh_rewrite=$(docker exec -u "$remote_user" "$cid" git config --show-scope --get-regexp '^url\..*\.insteadof$' 2>/dev/null \
       | grep -v '^system' | grep -i 'git@github\.com' | grep 'https://github\.com' || true)
     if [ -n "$ssh_rewrite" ]; then
-      note "warning: your own git config rewrites https://github.com to SSH, which no key can"
-      note "         follow in app mode: $ssh_rewrite"
+      note "warning: your own git config rewrites https://github.com to SSH, which no key"
+      note "         here can follow: $ssh_rewrite"
       note "         Update the dotfiles (bin/git-signing-setup) and 'codespace rebuild $name'."
     fi
-  elif [ "$gh_auth" = app ]; then
-    note "note: GITHUB_AUTH=app, but this container predates the token broker's mount — 'codespace rebuild $name'"
   else
-    docker exec -u root "$cid" sh -c '
-      git config --system --unset-all credential.https://github.com.helper 2>/dev/null
-      git config --system --unset-all credential.https://github.com.useHttpPath 2>/dev/null
-      git config --system --unset-all url.https://github.com/.insteadOf 2>/dev/null
-      [ "$(readlink /usr/local/bin/gh 2>/dev/null)" = "$1/gh-codespace" ] && rm -f /usr/local/bin/gh
-      exit 0
-    ' _ "$CONTAINER_AUTH" 2>/dev/null || true
+    note "warning: this container predates the credential services' mount, so nothing in it"
+    note "         can push or sign — 'codespace rebuild $name'"
   fi
-
-  # With a key available, reach GitHub over SSH even for https remotes, so a
-  # repo cloned over https can still be pushed. Tied to authentication, not to
-  # signing: VM-side signing needs no key in the container.
-  if [ "$git_ssh" = agent ] || [ "$git_ssh" = keyfile ]; then
-    docker exec -u root "$cid" \
-      git config --system --replace-all url."git@github.com:".insteadOf https://github.com/ 2>/dev/null \
-      || note "note: could not set the https→ssh rewrite"
-  fi
-
   # Wire the identity in at the container's *system* level, so `git commit`
   # knows who you are whether or not you use a dotfiles repo. Mounting the file
   # is not enough on its own — something has to include it, and until now only
@@ -1313,7 +1119,7 @@ cmd_up() {
     esac
   fi
 
-  # Login shells get the git env too; the editor's own terminals inherit it
+  # Login shells get the codespace env too; the editor's own terminals inherit it
   # from the code-server process below.
   local envfile
   envfile=$(mktemp)
@@ -1324,27 +1130,18 @@ cmd_up() {
     # zone actually applied, so a container with no tzdata is not told it is on
     # a zone it cannot resolve.
     [ "${tz_status:-1}" = 0 ] && echo "export TZ=$tz"
-    case "$git_ssh" in
-      agent)
-        echo "export SSH_AUTH_SOCK=$agent_sock"
-        echo "export GIT_SSH_COMMAND=\"$ssh_cmd\""
-        ;;
-      keyfile)
-        echo "export GIT_SSH_COMMAND=\"$ssh_cmd\""
-        ;;
-    esac
     # Deliberately unexpanded: $HOME has to resolve inside the container at
     # login, not out here.
     # shellcheck disable=SC2016
     echo '[ -r "$HOME/.codespace-secrets" ] && . "$HOME/.codespace-secrets"'
-    # App mode: a fresh GITHUB_TOKEN for every login shell, over the one saved
+    # A fresh GITHUB_TOKEN for every login shell, over the one saved
     # at `up`. That one lapses 8 hours after `up`, and every new terminal would
     # load it from .codespace-secrets until the next `up`. git and gh never
     # read it — the credential helper and the shim ask the broker themselves —
     # so this is for whatever reads the variable. Milliseconds over the socket;
     # on any failure the saved token stays. Only processes already running
     # past 8 hours can hold a dead one.
-    if [ "$gh_auth" = app ] && [ "$have_auth" = 1 ]; then
+    if [ "$have_auth" = 1 ]; then
       # shellcheck disable=SC2016
       printf '%s\n' \
         "if [ -S $CONTAINER_AUTH/token.sock ] && command -v curl >/dev/null 2>&1; then" \
@@ -1362,26 +1159,9 @@ cmd_up() {
   # up with no workspace at all: the code is mounted and the container is fine,
   # but the file tree is empty and terminals start in $HOME.
   #
-  # A container created before editors moved onto sockets has no
-  # $CONTAINER_EDITOR mount, and `up` cannot add one: mounts are fixed at
-  # create. Its editor listens on a TCP port nginx never forwards to.
-  #
-  # Shell-only rather than an error: the container is up and fine by this
-  # point, and its container layer may hold things worth getting out before a
-  # rebuild discards them — Claude Code's state in $HOME, for one.
   case " $mounts " in
     *" $CONTAINER_EDITOR "*) ;;
-    *)
-      echo
-      echo "  $name is up — shell only"
-      echo "  Its container predates editors moving behind nginx, so it has no editor socket."
-      echo
-      echo "  codespace shell $name       a terminal inside it"
-      echo "  codespace rebuild $name     brings the editor back. The checkout and volumes are"
-      echo "                              kept; everything else in the container, \$HOME included,"
-      echo "                              is not — take out what you need first."
-      return 0
-      ;;
+    *) die "$name predates editors behind nginx and has no editor socket. 'codespace shell $name' to take out anything worth keeping, then 'codespace rebuild $name'" ;;
   esac
 
   # Liveness is asked of the editor itself, over its socket, not inferred from a
@@ -1409,13 +1189,8 @@ cmd_up() {
   if [ "$editor_live" = 0 ] || [ "$have" != "$want" ]; then
     note "starting editor on $remote_ws"
     docker exec -u root "$cid" sh -c "pkill -f '[c]ode-server.*--(bind-addr|socket)' >/dev/null 2>&1; exit 0"
-    local -a envargs=()
-    case "$git_ssh" in
-      agent)   envargs+=(-e "SSH_AUTH_SOCK=$agent_sock" -e "GIT_SSH_COMMAND=$ssh_cmd") ;;
-      keyfile) envargs+=(-e "GIT_SSH_COMMAND=$ssh_cmd") ;;
-    esac
     # 0660 with nginx's group, inherited from the setgid directory.
-    docker exec -d -u "$remote_user" ${envargs[@]+"${envargs[@]}"} "$cid" bash -lc \
+    docker exec -d -u "$remote_user" "$cid" bash -lc \
       "printf '%s' \"$want\" > /tmp/code-server.args
        exec code-server --socket $sock --socket-mode 660 --auth none \
          --disable-telemetry --disable-update-check \
@@ -1442,28 +1217,21 @@ cmd_up() {
   echo
   echo "  $name is up"
   echo "  https://localhost:$port/"
-  [ "$git_ssh" = agent ] && echo "  git: ssh agent forwarded (key stays on the VM)"
   if [ "$signing" = vm ]; then
     # What the signing service will use: the agent at the stable path it is
     # given (modules/codespace-auth.nix), or the key file if it has no
     # passphrase. Not this shell's SSH_AUTH_SOCK, which may be another agent.
-    local label="" vm_agent
-    vm_agent="/run/user/$(id -u)/ssh-agent"
-    [ "$gh_auth" = legacy ] && label=" (GIT_SIGNING=vm)"
-    if SSH_AUTH_SOCK=$vm_agent ssh-add -l >/dev/null 2>&1 \
-        || { [ "$have_key" = 1 ] && [ "$key_locked" = 0 ]; }; then
-      echo "  git: commits signed on the VM$label"
+    if SSH_AUTH_SOCK="/run/user/$(id -u)/ssh-agent" ssh-add -l >/dev/null 2>&1 \
+        || ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
+      echo "  git: commits signed on the VM"
     else
-      echo "  git: commits signed on the VM$label — but the key is locked: run 'ssh-auth' before committing"
+      echo "  git: commits signed on the VM — but the key is locked: run 'ssh-auth' before committing"
     fi
   fi
-  [ "$gh_auth" = legacy ] && [ -n "$token_repo" ] && [ "$have_auth" = 1 ] \
-    && echo "  token: scoped to $token_repo, from /mnt/github/token.sock (GITHUB_AUTH=app to use it)"
-  [ "$git_ssh" = keyfile ] && echo "  git: key from /persist/git"
-  [ "$gh_auth" = legacy ] && [ "$git_ssh" = pubkey ] && [ "$key_locked" = 1 ] \
-    && echo "  git: UNAVAILABLE — key is passphrase-locked, run 'ssh-add $key'"
-  if [ "$gh_auth" = app ] && [ "$have_auth" = 1 ]; then
-    if [ -n "$token_repo" ]; then
+  if [ "$have_auth" = 1 ]; then
+    if printf '%s' "$secrets_json" | jq -e 'has("GH_TOKEN")' >/dev/null 2>&1; then
+      echo "  git: https, with GH_TOKEN from your secrets — it outranks the scoped token"
+    elif [ -n "$token_repo" ]; then
       echo "  git: https, with a token scoped to $token_repo — no SSH credential in here"
     else
       echo "  git: no GitHub repository, so no token — and no SSH credential in here"
@@ -1472,12 +1240,9 @@ cmd_up() {
     [ "$granted" = '{}' ] || jq -r 'to_entries[]
       | "       and \(.key): \(.value | to_entries | map(select(.key != "metadata")) | map("\(.key) \(.value)") | join(", "))"' \
       <<<"$granted"
-    [ "$gh_shim" = 1 ] && echo "  gh:  a fresh scoped token on every run"
-  elif [ -n "$gh_token" ]; then
-    echo "  gh:  authenticated with the VM's token"
+    [ "$gh_shim" = 1 ] && echo "  gh:  a fresh scoped token on every run, unless GH_TOKEN is set"
   fi
   [ "$have_vm" = 1 ] && echo "  vm:  control socket mounted — 'vm help' inside"
-  [ -z "$git_ssh" ] && echo "  git: no credentials mounted (see 'Git inside containers' in the README)"
   echo
   echo "  F1 opens the command palette. Ctrl+Shift+P is a Firefox private window."
   if [ -d "$TLS_EXPORT" ]; then

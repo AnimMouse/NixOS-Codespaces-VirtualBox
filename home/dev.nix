@@ -110,12 +110,11 @@ in
 
   # A passphrase-protected key cannot be used by anything that has no terminal
   # to prompt at — the VM's signing service for codespaces among them. The
-  # agent holds the decrypted key; GITHUB_AUTH=legacy also hands its socket to
-  # containers, so the key itself never leaves the VM.
+  # agent holds the decrypted key, and neither it nor its socket ever leaves
+  # the VM.
   #
   # Socket is $XDG_RUNTIME_DIR/ssh-agent, i.e. /run/user/1000/ssh-agent: the
-  # same path every login, which is what makes a container created in one
-  # session still work in the next.
+  # same path every login, which is the one the signing service is given.
   services.ssh-agent.enable = true;
 
   # For the API — opening PRs, reading issues — on the app's token, fetched

@@ -114,9 +114,8 @@ Nothing to rotate by hand: the broker refreshes the app's tokens, and
 
 > **Containers never get the key.** It stays on the VM and signs there.
 > Until the app is set up, a codespace comes up able to sign but not to push,
-> and `up` says so. `GITHUB_AUTH=legacy` forwards the agent into containers
-> instead, as described further down — that needs the key registered as an
-> authentication key too.
+> and `up` says so. For an owner that will not install the app, a PAT as
+> `GH_TOKEN` in that codespace's secrets — see "GitHub authentication".
 
 ```bash
 ssh-keygen -t ed25519 -C "dev@nixos-vm" -f /persist/git/id_ed25519
@@ -203,12 +202,8 @@ A user ssh-agent runs as a systemd service, so its socket is
 `/run/user/1000/ssh-agent` on every boot, and lingering keeps it alive when you
 log out. That means the socket a container was created with is still the right
 one at your next login. `AddKeysToAgent yes` is set, so the first `ssh` or `git`
-of the boot adds the key after a single prompt.
-
-Under `GITHUB_AUTH=legacy` the container is handed that **socket** instead, plus
-the *public* key and `known_hosts` as individual file mounts; there a locked
-key shows as `Permission denied (publickey)`, and `codespace up` says which it
-is.
+of the boot adds the key after a single prompt. Neither the key nor the
+agent's socket ever goes into a container.
 
 ## 4. Point the launcher at your dotfiles
 
@@ -340,7 +335,7 @@ bare image. Deliberately no
 `git init`: run one yourself if you want the directory to become a repo. Running
 it again on an existing name just starts that codespace, so it is safe to repeat.
 
-Use `rebuild` after changing a `devcontainer.json` or `GITHUB_AUTH`: mounts and
+Use `rebuild` after changing a `devcontainer.json`: mounts and
 features are fixed when a container is created.
 
 ## What persists inside a codespace
@@ -732,7 +727,7 @@ balloon command works on your VirtualBox build before relying on it.
 |---|---|
 | **GitHub App** | Everything that authenticates: git over https and `gh`, on the VM (account-wide) and in codespaces (scoped). Tokens last 8 hours and are refreshed by the broker |
 | **SSH key** | Signing. Registered on GitHub as a signing key only, unless another machine still authenticates with it |
-| **PAT** | Not used. `export GH_TOKEN=<a PAT>` for one shell when the app cannot reach something — an organisation that has not installed it |
+| **PAT** | Only where the app cannot reach: an organisation that has not installed it. `GH_TOKEN` in that codespace's secrets, or `export GH_TOKEN=…` for one shell — below |
 | **OAuth (`gh auth login`)** | Not used. Its token reaches everything you can, in every org, and cannot be narrowed |
 
 The VM's git sends GitHub SSH URLs over https, and asks the token broker for a
@@ -752,14 +747,9 @@ the app is installed on are reachable — the app's own permissions are the
 ceiling, on the VM as in codespaces. `gh repo create` needs Administration,
 which the app does not have by default.
 
-**How containers get credentials: `GITHUB_AUTH=app`, the default.** No SSH
-credential in containers at all. Needs the GitHub App setup in
-[docs/GITHUB-APP.md](docs/GITHUB-APP.md) and one `github-app-login` on the VM;
-`/persist/codespace/config` can switch back:
-
-```bash
-GITHUB_AUTH=legacy      # app (default) | legacy
-```
+**How containers get credentials.** No SSH credential in containers at all.
+Needs the GitHub App setup in [docs/GITHUB-APP.md](docs/GITHUB-APP.md) and one
+`github-app-login` on the VM.
 
 Containers get no agent and no key. git pushes over https with a token
 scoped to the codespace's own repository, fetched from the VM's broker by a
@@ -767,8 +757,9 @@ credential helper on every push; `gh` is a shim that fetches a fresh one per
 run; commits are signed on the VM. SSH remote URLs are rewritten to https in
 the container, so a checkout cloned as `git@github.com:…` still pushes. A
 compromised codespace can push to its own repository and nowhere else — as in
-real Codespaces. Containers made before the switch keep whatever credential
-they were created with, and `up` says so: `codespace rebuild` each one.
+real Codespaces. A container created with an SSH credential, before
+`GITHUB_AUTH=legacy` was removed, still has it, and `up` says so loudly:
+`codespace rebuild` it.
 
 As in Codespaces, the token is **read-only on a repository you cannot push
 to**, and is **revoked** when its container goes — `codespace rm`, `rebuild`,
@@ -781,6 +772,24 @@ a process already running for 8 hours can hold an expired one. `GH_TOKEN` is
 yours: `export GH_TOKEN=<a PAT>` when you need more than the codespace's own
 repository, and both `gh` and `git` use it — gh ranks `GH_TOKEN` first, and the
 credential helper honours it. `unset GH_TOKEN` drops back to the scoped token.
+
+**An owner without the app** — an organisation that will not install it — gets
+no token, and `up` says so. The fallback is the one real Codespaces has: a
+fine-grained PAT, limited to that owner's repositories, as `GH_TOKEN` in the
+codespace's own secrets:
+
+```bash
+printf 'GH_TOKEN=github_pat_…\n' >> /persist/codespace/<name>/secrets
+chmod 600 /persist/codespace/<name>/secrets
+codespace up <name>      # rewrites the secrets; no rebuild
+```
+
+`GH_TOKEN`, never `GITHUB_TOKEN`: the launcher writes its scoped token over
+that name and the credential helper never reads it, so a PAT there reaches
+`gh` by luck and git not at all — `up` warns if it finds one. Real Codespaces
+refuses secrets named `GITHUB_*` outright. Commits are still signed on the VM;
+only what pushes them changes. Unlike the app's tokens, the PAT sits in the
+container in plain text, as it would in Codespaces.
 
 A dotfiles repository given as a URL must then be public, since nothing in
 the container can authenticate the clone; `DOTFILES_REPOSITORY=/persist/dotfiles`
@@ -816,69 +825,25 @@ needs no credential at all.
   tells the broker which repository each push is for. `gh` and `GITHUB_TOKEN`
   carry the codespace's own repository's token.
 
-**With `GITHUB_AUTH=legacy`** — checked in this order, and what each mode
-actually exposes under `/mnt/git-ssh`:
-
-| | Used when | Container gets | Private key exposed? |
-|---|---|---|---|
-| **ssh-agent** | the agent holds a key | the socket at `/mnt/git-ssh/agent.sock`, plus `id_ed25519.pub` and `known_hosts` as single-file mounts | **No** |
-| **key file** | no agent, and the key has no passphrase | the whole `/persist/git` directory, and `GIT_SSH_COMMAND` pointing at the key | Yes — it is the only way this mode can work |
-| **neither** | the key is passphrase-locked and no agent holds it | `id_ed25519.pub` and `known_hosts` only; a loud warning naming the `ssh-add` to run | No |
-
-The mode is chosen automatically, but you can pin it in
-`/persist/codespace/config`:
-
-```bash
-GIT_SSH_MODE=agent      # auto (default) | agent | keyfile | none
-```
-
-**`agent` is the one to set** if you care. The default `auto` is convenient but
-it downgrades silently — forget to `ssh-add` once and it mounts the private key
-into the container instead, which is precisely what you were avoiding.
-`GIT_SSH_MODE=agent` turns that into a hard error naming the `ssh-add` to run.
-It is also the only mode that can work at all with a passphrase-protected key.
-
-The public half is mounted in every mode because the container needs it to
-configure commit signing — `user.signingkey` is the `.pub`, and `ssh-keygen -Y
-sign` falls back to the agent when the private half is unreadable.
-
-With the agent, `git clone`, `git push` and commit signing inside the container
-all work with **no passphrase prompt** — the crypto happens back on the VM.
-Signing works because `user.signingkey` is the *public* key, and `ssh-keygen -Y
-sign` will use the agent when the private half is unreadable.
-
-**Signing on the VM** is what `GITHUB_AUTH=app` always does. In `legacy` it is
-optional — `GIT_SIGNING=vm` in `/persist/codespace/config`:
-
-```bash
-GIT_SIGNING=vm          # agent (default) | vm
-```
-
-Commits and tags are then signed by a service on the VM
+**Signing on the VM.** Commits and tags are signed by a service on the VM
 (`modules/codespace-auth.nix`) with the same key, and only the signature comes
 back: git in the container runs `/mnt/github/git-sign-codespace` as its
-`gpg.ssh.program`. The point is what it makes possible next. An ssh-agent
-cannot tell signing from logging in, so a container holding the forwarded agent
-can push to every repository you can; a signature from this service is in
-git's own namespace and cannot be used to log in — which is what lets
-`GITHUB_AUTH=app` stop forwarding the agent at all. Chosen on every `up`; a container from before the service
-needs one `codespace rebuild` for its `/mnt/github` mount. If the VM's agent is
-locked, the commit fails with "run ssh-auth on the VM".
+`gpg.ssh.program`, with `user.signingkey` set to the mounted *public* key. An
+ssh-agent cannot tell signing from logging in, so a container holding a
+forwarded agent could push to every repository you can; a signature from this
+service is in git's own namespace and cannot be used to log in. If the VM's
+agent is locked, the commit fails with "run ssh-auth on the VM".
 
 **`gh` in containers.** On the VM the login lives in `~/.config/gh`, which is on
 `/persist` — so it survives a reboot *and* a `system.vdi` wipe. Containers have
 their own `$HOME` and inherit nothing, so the container gets `GITHUB_TOKEN`,
 the variable real Codespaces sets: a token scoped to the codespace's
-repository, or in `legacy` the VM's own `gh auth token`, read at `up` time —
-re-run `codespace up` after re-authenticating. `GH_TOKEN` is left unset, so
-exporting your own overrides it.
+repository, refreshed by every login shell. `GH_TOKEN` is left unset, so
+yours overrides it.
 `CONTAINER_GH_TOKEN=0` in the launcher config turns it off.
 
 > `gh` itself is not in most base images — add
 > `ghcr.io/devcontainers/features/github-cli:1` to the devcontainer config.
-
-> Network blocking outbound port 22? Add to `~/.ssh/config`: `Host github.com` /
-> `Hostname ssh.github.com` / `Port 443`.
 
 ## Dotfiles
 
@@ -994,7 +959,7 @@ DEFAULT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 /persist/dev-vm/         this repo, for the rebuild loop
 /persist/repos/          project checkouts
 /persist/refs/           reference checkouts, shared read/write with all containers
-/persist/git/            the SSH key, your identity, allowed_signers, known_hosts
+/persist/git/            the signing key, your identity, allowed_signers
 /persist/ssh/            SSH host keys — machine identity, not yours
 /persist/home/dev/       the dev user's home (/home/dev symlinks here)
 /persist/docker/         images, volumes, containers
@@ -1115,13 +1080,13 @@ install script runs after every `up`), and stopping a container at all.
 | `400 No required SSL certificate was sent` | This Firefox profile has no client certificate — setup step 5. Expected for any other profile |
 | `403 Forbidden` from nginx, with the certificate imported | The request came from another site or another editor's port (Fetch Metadata). Open the editor's URL directly — typed, bookmarked, or the kiosk launcher |
 | `502 Bad Gateway` | nginx is fine; no editor is on that port's socket. `codespace up <name>` |
-| `up` says `shell only` | The container predates editors moving behind nginx: no socket mount, and mounts are fixed at create. `codespace shell <name>` still works; `codespace rebuild <name>` brings the editor back, keeping the checkout and volumes but nothing else in the container — copy out what you need first |
+| `up` says the container `predates editors behind nginx` | No socket mount, and mounts are fixed at create. `codespace shell <name>` still works; `codespace rebuild <name>` brings the editor back, keeping the checkout and volumes but nothing else in the container — copy out what you need first |
 | After a VM reboot, `codespace up` says the editor is not answering and `codespace logs` shows nothing newer than the shutdown | The editor is not being restarted. Fixed — `up` probes the editor's socket instead of looking for its process, so a container that was stopped with the VM gets its editor started again |
 | Terminal opens in `$HOME`, `git status` fails | Editor started without a folder. `codespace up <name>` replaces it |
-| Dotfiles not applied, no error | The clone failed silently. Check the repo is reachable and the key is registered |
+| Dotfiles not applied, no error | The clone failed silently. Nothing in the container can authenticate it: use a public URL or `DOTFILES_REPOSITORY=/persist/dotfiles` |
 | Commits are not signed | `cat ~/.config/git/local` in the container — no key found. `codespace rebuild <name>` |
 | `codespace up` hangs at `Executing command ./install.sh...` | Something in the dotfiles install is waiting for input. The usual culprit is `ssh-keygen` on a passphrase-protected key: the tooling gives install.sh a tty, so it prompts and waits forever, and the prompt is usually swallowed. Ctrl-C, then `codespace rebuild <name>`. Keep every `ssh-keygen` in a dotfiles repo non-interactive with `-P ""` |
-| `git@github.com: Permission denied (publickey)` inside a `GITHUB_AUTH=legacy` container | Either the key is passphrase-locked with no agent holding it — `ssh-auth`, then `codespace rebuild <name>` — or it is not registered on GitHub as an *Authentication* key. The two produce an identical message; `ssh -T git@github.com` on the VM tells them apart |
+| `git push` in a codespace: "the VM gave no token" for an organisation's repository | The app is not installed on that owner. Install it, or put `GH_TOKEN=<a PAT>` in `/persist/codespace/<name>/secrets` and `codespace up <name>` |
 | `git push` or `gh` on the VM: "the VM gave no token", or 403 | "has lapsed or was revoked": `github-app-login`. A 403 on one repository: the app is not installed on its owner (docs/GITHUB-APP.md §5), or the app lacks the permission — `gh repo create` needs Administration |
 | `Failed to get blkid info (returned 512) for  on  ` | The disko step was skipped. `findmnt /mnt` must show a real mount |
 | Boot hangs waiting for `/persist` | `persist.vdi` detached or on the wrong SATA port. Deliberately a hard stop |

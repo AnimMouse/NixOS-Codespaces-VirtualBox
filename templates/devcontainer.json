@@ -27,7 +27,7 @@
   "init": true,
 
   "features": {
-    // gh, for the GH_TOKEN the launcher injects from the VM.
+    // gh, for the scoped GITHUB_TOKEN the launcher provides through its shim.
     "ghcr.io/devcontainers/features/github-cli:1": {},
 
     // Listed explicitly: claude-code only declares `installsAfter` on it, and

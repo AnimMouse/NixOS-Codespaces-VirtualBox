@@ -12,7 +12,10 @@ no SSH credential in containers, git and gh on scoped tokens, in use in every
 codespace. Phase 4, parity with Codespaces, is built and checked on the VM
 (§4.7), with two edges open. Phase 5, the VM itself on the app, is built
 and checked (§6.1); the key stays an authentication key on GitHub while the
-Windows host authenticates with it too. Facts marked *checked* were read from GitHub's
+Windows host authenticates with it too. Since then `GITHUB_AUTH=legacy`,
+`GIT_SSH_MODE` and `GIT_SIGNING` have been removed (§8): scoped tokens and
+signing on the VM are the only mode, and an owner without the app gets a PAT
+as `GH_TOKEN` in that codespace's secrets. Facts marked *checked* were read from GitHub's
 documentation, from source, or observed; facts marked **verify** must be
 confirmed before or during the build, and the design bends if they turn out
 false.
@@ -21,7 +24,7 @@ false.
 
 ## 1. Why
 
-Today every container can act as the whole account:
+Before this plan every container could act as the whole account:
 
 | Credential | How it gets in | What it reaches |
 |---|---|---|
@@ -348,8 +351,8 @@ prints the broker's reason to stderr first.
   token, and git would then need gh installed, which a `plain` image lacks.
 - **Removed from containers**: the forwarded agent, keyfile mode, the
   private key in every form, the https→ssh rewrite, and `GIT_SSH_COMMAND`.
-  `/mnt/git-ssh` keeps the public key, identity, `allowed_signers` and
-  `known_hosts`, which verification and the dotfiles use.
+  `/mnt/git-ssh` keeps the public key, identity and `allowed_signers`, which
+  signing and verification use. (`known_hosts` went with `legacy`, §8.)
 
 ### 4.6 Permissions per token
 
@@ -596,8 +599,12 @@ and `administration` on its own:
   - Real Codespaces needs none either: it is GitHub's own app, governed by the
     org's Codespaces settings instead of an installation — a privilege third-
     party apps do not get.
-  - For an org that will not install it: `export GH_TOKEN=<a PAT>` in that
-    codespace, and clone it on the VM with the PAT by hand (README).
+  - For an org that will not install it: a fine-grained PAT as `GH_TOKEN` in
+    `/persist/codespace/<name>/secrets`, then `codespace up <name>` — the
+    secret Codespaces would use, and both the credential helper and the gh
+    shim prefer it to the broker. Not as `GITHUB_TOKEN`: the launcher writes
+    its scoped token over that name and git never reads it (`up` warns). The
+    first clone on the VM needs the PAT by hand (README).
 
 ---
 
@@ -663,9 +670,8 @@ app, leaving the key one job: signing.
   `https`. A `gh auth login` OAuth session, if there is one, is removed by
   hand — the token from the environment outranks it, but it still reaches
   everything. (This VM never had one.)
-- **`GITHUB_AUTH=legacy`** handed containers the VM's `gh auth token`; it now
-  asks the broker for the account-wide token first. Its agent forwarding can
-  no longer push once the key is signing-only.
+- **`GITHUB_AUTH=legacy`** handed containers the VM's `gh auth token`, then
+  the broker's account-wide one. Removed since (§8).
 - **On GitHub, the key becomes signing-only**: removed as an Authentication
   key, kept as a Signing key. That is what disables SSH auth — a leaked key
   could still sign, and could push nowhere. **Not done**: Git Bash on the
@@ -713,7 +719,8 @@ app, leaving the key one job: signing.
 
 ### Rollback
 
-`GITHUB_AUTH=legacy` plus `codespace rebuild` restores agent forwarding. The app can be uninstalled from GitHub at any time, which
+There is no switch back to agent forwarding any more (§8); that would be a
+revert in git. The app can be uninstalled from GitHub at any time, which
 invalidates every token it ever issued.
 
 ---
@@ -737,3 +744,27 @@ invalidates every token it ever issued.
       for `write`.
 - [ ] A codespace with no `DOTFILES_REPOSITORY` still commits as you and signs
       (CLAUDE.md §6); one *with* the dotfiles still signs too.
+
+---
+
+## 8. Legacy removed
+
+Once every codespace was on the app, the old path went (2026-11-15):
+
+- **`GITHUB_AUTH=legacy`** — agent forwarding, keyfile mode, the https→ssh
+  rewrite, `GIT_SSH_COMMAND` and the VM's account-wide token in containers.
+  `up` now refuses a config that still says `legacy`, naming the fallback.
+- **`GIT_SSH_MODE` and `GIT_SIGNING`** — no longer read; `up` notes them if set.
+  Every codespace signs on the VM.
+- **`github-known-hosts.service`** and the `known_hosts` mount: nothing in a
+  container uses SSH to GitHub. `/persist/git/known_hosts` can be deleted.
+- **Migration code** for containers from before the agent socket moved out of
+  `/tmp`, and the "shell only" mode for containers from before nginx — such a
+  container is now refused with the `rebuild` to run. One guard stays: a
+  container still holding an SSH credential gets a loud warning at `up`.
+
+**The fallback for an owner without the app** is a PAT as `GH_TOKEN` in the
+codespace's secrets (§5), the way real Codespaces does it. `up` warns about a
+`GITHUB_TOKEN` in a secrets file, which would reach `gh` by luck and git not
+at all, and when the broker gives no token it names the `GH_TOKEN` fix unless
+one is already there.

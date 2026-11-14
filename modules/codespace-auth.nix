@@ -40,7 +40,7 @@ let
     checkPhase = "${lib.getExe pkgs.shellcheck} -s sh $target";
   };
   git-sign-codespace = shClient "git-sign-codespace";
-  # Phase 3, GITHUB_AUTH=app: git's credential helper, and the gh shim.
+  # git's credential helper, and the gh shim (docs/GITHUB-APP.md phase 3).
   git-credential-codespace = shClient "git-credential-codespace";
   gh-codespace = shClient "gh-codespace";
   clients = [ git-sign-codespace git-credential-codespace gh-codespace ];
@@ -51,10 +51,8 @@ in
   # signing from authenticating, so a container holding the forwarded agent can
   # push to any repository. Signing here, on the VM, with the one key — and
   # returning only the signature, in namespace "git", which cannot be used to
-  # log in — lets the agent stop being forwarded once the token broker
-  # (phase 2) covers authentication.
-  #
-  # Which codespaces use it is the launcher's GIT_SIGNING setting.
+  # log in — is what let the agent stop being forwarded once the token broker
+  # (phase 2) covered authentication. Every codespace signs this way.
   systemd.sockets.codespace-sign = {
     description = "Commit signing for codespaces";
     wantedBy = [ "sockets.target" ];
