@@ -1217,9 +1217,20 @@ cmd_up() {
   # already checked the client certificate — and no password means nothing
   # here holds a credential for any other editor.
   local sock="$CONTAINER_EDITOR/editor.sock"
-  # umask=022 in the record so that editors started before the umask fix,
-  # with 0000, are replaced on their next `up` rather than left running.
-  local want="$sock $remote_ws umask=022" have="" editor_live=0
+  # Forwarded ports on their own hostnames, as Codespaces' <name>-<port>
+  # .app.github.dev: https://<app port>.app.localhost:<editor port>/ reaches
+  # that port at its own root, so an app that builds absolute paths works,
+  # unlike under /proxy/<port>/, which strips the prefix the browser still
+  # sees. Each app is also its own origin rather than the editor's, so its
+  # scripts cannot reach code-server's APIs. code-server matches the Host
+  # header *with* its port, hence the editor's port in the pattern; it then
+  # points the PORTS tab at these URLs (VSCODE_PROXY_URI). Firefox resolves
+  # *.localhost to loopback itself, and nginx's certificate carries
+  # *.app.localhost (modules/editor-proxy.nix).
+  local proxy_domain="{{port}}.app.localhost:$port"
+  # umask=022 and the proxy domain are in the record so that editors started
+  # without them are replaced on their next `up` rather than left running.
+  local want="$sock $remote_ws umask=022 proxy=$proxy_domain" have="" editor_live=0
   editor_answers "$port" && editor_live=1
   # The arguments are recorded next to the log so an editor started by an older
   # version of this script — or on a different folder — is replaced rather than
@@ -1234,6 +1245,7 @@ cmd_up() {
       "umask 022
        printf '%s' \"$want\" > /tmp/code-server.args
        exec code-server --socket $sock --socket-mode 660 --auth none \
+         --proxy-domain '$proxy_domain' \
          --disable-telemetry --disable-update-check \
          \"$remote_ws\" >/tmp/code-server.log 2>&1"
   fi
@@ -1258,6 +1270,7 @@ cmd_up() {
   echo
   echo "  $name is up"
   echo "  https://localhost:$port/"
+  echo "  apps: https://<port>.app.localhost:$port/ — a forwarded port at its own root"
   if [ "$signing" = vm ]; then
     # What the signing service will use: the agent at the stable path it is
     # given (modules/codespace-auth.nix), or the key file if it has no

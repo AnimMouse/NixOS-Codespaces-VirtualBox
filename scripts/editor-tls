@@ -57,13 +57,20 @@ issue() {
   rm -f "$name.csr"
 }
 
-if ! signed_by_ca server.crt; then
+# *.app.localhost: forwarded ports on their own hostnames,
+# https://<port>.app.localhost:<editor port>/. Not *.localhost — Firefox wants
+# two labels after a wildcard. The CA's name constraint, localhost, covers
+# subdomains, so only this certificate changes: nothing to re-import. One made
+# before the name was added is remade.
+has_app_name() { openssl x509 -in server.crt -noout -ext subjectAltName 2>/dev/null | grep -qF '*.app.localhost'; }
+
+if ! signed_by_ca server.crt || ! has_app_name; then
   echo "creating the editor server certificate"
   issue server "/CN=localhost" \
     "basicConstraints=critical,CA:FALSE" \
     "keyUsage=critical,digitalSignature" \
     "extendedKeyUsage=serverAuth" \
-    "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    "subjectAltName=DNS:localhost,DNS:*.app.localhost,IP:127.0.0.1"
   # nginx was started against the old pair, if any; it rereads on reload.
   # --no-block: this unit is ordered before nginx, so waiting on a queued
   # nginx start from in here would deadlock.

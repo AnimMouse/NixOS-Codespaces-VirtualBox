@@ -46,6 +46,7 @@ row where something was learnt the hard way.
 | Secrets in one directory | launcher, `modules/vm-control.nix` | `/persist/codespace/secrets/all` for every codespace, `secrets/<name>` per codespace, `0700`, denied to vm-control as one path. Per-codespace files used to sit in each state directory, readable through the socket. Secrets at an old path stop `up` with the `mv` to run. `config`, `secrets`, `all`, `code-server` reserved as codespace names |
 | umask 022 in codespaces | launcher | `docker exec` gave every process umask `0000`, so files were `0666` and directories `0777` — the flake checkout included, and `/etc/gitconfig`. Set in `/etc/profile.d/codespace.sh`, the editor's start and the launcher's root writes; the system gitconfig `chmod 0644` on every `up` (CLAUDE.md §8) |
 | `/persist/secrets` dropped | `modules/persist.nix` | a spare root-only directory from phase 1 that nothing used |
+| Forwarded ports on their own hostnames | launcher, `modules/{code-server,editor-proxy}.nix`, `scripts/editor-tls` | `https://<port>.app.localhost:<editor port>/` via code-server's `--proxy-domain`, as Codespaces' `<name>-<port>.app.github.dev`: apps get their own root and their own origin. `*.app.localhost` on nginx's certificate, reissued automatically; app hostnames admit user-clicked navigations. CLAUDE.md §3 amended |
 | The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Codespaces' own permissions | launcher (`SOURCE_PERMISSIONS`, `APP_PERMISSIONS`) | defaults and ceiling probed from a real codespace's token: workflows write by default, read on CI, deployments, discussions, pages; packages read by request. The app was raised first (docs/GITHUB-APP.md §4.1) |
@@ -209,6 +210,13 @@ If you touch any of these, you can now test them properly rather than by proxy.
   brought it to none.
 
 ### Pending a real run
+
+- **Forwarded ports on their own hostnames** (2026-11-16): built and
+  evaluated, not yet run. After `rebuild` and `codespace up`, check in
+  Firefox: `https://<port>.app.localhost:<editor port>/` loads a dev server
+  at its root with no certificate warning, Vite's HMR connects, the PORTS tab
+  links there and the click is not refused, and a link to an *editor* from
+  another page still gets `403`.
 
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.

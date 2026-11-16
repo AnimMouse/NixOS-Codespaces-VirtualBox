@@ -338,6 +338,37 @@ it again on an existing name just starts that codespace, so it is safe to repeat
 Use `rebuild` after changing a `devcontainer.json`: mounts and
 features are fixed when a container is created.
 
+### Forwarded ports
+
+A server listening on a port inside a codespace — a dev server on 5173, an API
+on 3000 — is reached on its own hostname, the way Codespaces gives it
+`<name>-<port>.app.github.dev`:
+
+```
+https://5173.app.localhost:8003/      port 5173 in the codespace whose editor is on 8003
+```
+
+The app sees its requests at its own root, so absolute paths, redirects and
+websockets (Vite's HMR) work as they would locally. The editor's PORTS tab
+links there. Each app is also its own origin, apart from the editor's, so its
+scripts cannot reach code-server. Firefox resolves `*.localhost` to loopback by
+itself, and nginx's certificate covers `*.app.localhost` — no VirtualBox
+forward to add, nothing to import.
+
+code-server's `/proxy/<port>/` still works, but strips its prefix before the
+app sees the request while the browser keeps it, so an app that builds paths
+from `/` breaks there; and it runs on the editor's origin. Use it for tools
+outside Firefox, which may not resolve `*.localhost`.
+
+Two limits, both from nginx refusing cross-site requests it cannot vouch for
+(docs/EDITOR-MTLS.md): an app is opened by typing its URL or by clicking a
+link to it — not by a redirect nobody clicked, or a form posted from
+elsewhere — and one app's scripts cannot call another app by its hostname
+(nginx cannot tell another codespace's app from this one's). For a frontend
+calling an API in the same codespace, use the dev server's own proxy (Vite's
+`server.proxy`, `"proxy"` in a CRA `package.json`) so the browser sees one
+origin.
+
 ## What persists inside a codespace
 
 Only **`/workspaces/<name>`** is a bind mount of `/persist/repos/<name>`.

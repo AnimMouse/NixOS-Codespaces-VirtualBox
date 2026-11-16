@@ -69,12 +69,27 @@ in
     # same-site is refused too: localhost:8002 is same-site to localhost:8001,
     # since sites ignore ports, and one editor's pages have no business in
     # another's.
+    #
+    # One exception, for a forwarded port's own hostname (<port>.app.localhost)
+    # only: a page load the user clicked into — GET or HEAD, Sec-Fetch-Mode
+    # navigate, Sec-Fetch-User ?1. A link from the editor's PORTS tab to an app
+    # is cross-site (localhost vs app.localhost), and one app to another
+    # same-site, so without this every such click got a 403. A hostile page
+    # can still send you there on a click, carrying the client certificate —
+    # the exposure a private port in real Codespaces has with its login
+    # cookie. Never for the editors themselves, and never for scripted
+    # requests, forms or redirects nobody clicked.
     appendHttpConfig = ''
-      map $http_sec_fetch_site $editor_request_ok {
-        default     0;
-        ""          1;
-        none        1;
-        same-origin 1;
+      map $host $editor_app_host {
+        default                     0;
+        "~^[0-9]+\.app\.localhost$" 1;
+      }
+      map "$http_sec_fetch_site:$editor_app_host:$http_sec_fetch_mode:$http_sec_fetch_user:$request_method" $editor_request_ok {
+        default                                                    0;
+        "~^:"                                                      1;
+        "~^none:"                                                  1;
+        "~^same-origin:"                                           1;
+        "~^(same-site|cross-site):1:navigate:\?1:(GET|HEAD)$"     1;
       }
     '';
 

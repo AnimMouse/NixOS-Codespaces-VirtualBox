@@ -157,8 +157,13 @@ lost `.p12` alone were all *tested*.
 - **code-server's `/proxy/<port>/` previews are same-origin with the editor.**
   A web app you preview that way runs its scripts on the editor's origin and
   could drive it. That was equally true with the password, is code-server's
-  design, and the Fetch Metadata rule cannot see it. Preview only what you
-  would run in the editor's terminal anyway.
+  design, and the Fetch Metadata rule cannot see it. *Since 2026-11-16* every
+  forwarded port also has its own hostname, `<port>.app.localhost:<editor
+  port>` (code-server's `--proxy-domain`, `*.app.localhost` on nginx's
+  certificate), which is a separate origin: prefer it. For those hostnames
+  only, nginx also lets through a page load the user clicked into (GET/HEAD,
+  `navigate`, `Sec-Fetch-User: ?1`), since a link from the editor to an app
+  is cross-site; editors keep the strict rule.
 - **Real Codespaces is unaffected.** Nothing touches `devcontainer.json`.
 
 ---

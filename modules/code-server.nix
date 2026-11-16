@@ -33,6 +33,13 @@ in
     disableUpdateCheck = true;
 
     extraPackages = with pkgs; [ git ];
+
+    # Forwarded ports on their own hostnames, as in every codespace
+    # (scripts/codespace, "proxy_domain"): https://<port>.app.localhost:8000/.
+    # The pattern carries the port because code-server matches the Host header
+    # with it. Through extraArguments, not the module's own proxyDomain option:
+    # in 26.05 that option is declared and never passed to code-server.
+    extraArguments = [ "--proxy-domain={{port}}.app.localhost:8000" ];
   };
 
   # The socket directory, made here as well as by tmpfiles: on a switch the
