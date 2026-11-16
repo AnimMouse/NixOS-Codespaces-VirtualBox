@@ -209,14 +209,19 @@ If you touch any of these, you can now test them properly rather than by proxy.
   178,662 in `repos`, 4,485 in `refs` — and `sudo chmod -R go-w` on all three
   brought it to none.
 
+- **Forwarded ports on their own hostnames** (2026-11-17), in Firefox:
+  `https://<port>.app.localhost:<editor port>/` resolves without any DNS set-up,
+  is served with the reissued certificate and no warning, asks for the client
+  certificate (refusing it fails, as it should), and the app's absolute paths
+  work. The PORTS tab's link opens it, not refused. Firefox asks for the
+  certificate once per hostname; `security.default_personal_cert` =
+  `Select Automatically` in the editor profile stops the prompts.
+
 ### Pending a real run
 
-- **Forwarded ports on their own hostnames** (2026-11-16): built and
-  evaluated, not yet run. After `rebuild` and `codespace up`, check in
-  Firefox: `https://<port>.app.localhost:<editor port>/` loads a dev server
-  at its root with no certificate warning, Vite's HMR connects, the PORTS tab
-  links there and the click is not refused, and a link to an *editor* from
-  another page still gets `403`.
+- **Forwarded ports on their own hostnames** — what is left: a dev server's
+  hot reload (HMR websocket) connecting on an app hostname, and a link to an
+  *editor* from another page still getting `403`.
 
 - **Editor access by client certificate** is cut over and working in Firefox;
   containers get `400` from every editor port and hold no editor credential.
