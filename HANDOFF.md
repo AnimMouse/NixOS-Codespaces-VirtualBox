@@ -41,17 +41,26 @@ row where something was learnt the hard way.
 | Commit signing on the VM | `modules/codespace-auth.nix`, `scripts/git-sign-*` | `GIT_SIGNING=vm`; the key never enters a container |
 | GitHub App token broker | `scripts/github-app-login`, `scripts/github-token-service` | tokens scoped to the caller's repository, caller known by its container |
 | `GITHUB_AUTH=app` | launcher, `scripts/git-credential-codespace`, `scripts/gh-codespace` | https with scoped tokens; `GITHUB_TOKEN` set, `GH_TOKEN` left for a PAT |
-| Legacy removed | launcher, `modules/home.nix`, docs | `GITHUB_AUTH=legacy`, `GIT_SSH_MODE`, `GIT_SIGNING`, `github-known-hosts` and pre-migration container handling gone; an owner without the app gets `GH_TOKEN=<a PAT>` in `/persist/codespace/secrets/<name>` (docs/GITHUB-APP.md §8) |
+| Legacy removed (2026-11-15) | launcher, `modules/home.nix`, docs | `GITHUB_AUTH=legacy`, `GIT_SSH_MODE`, `GIT_SIGNING`, `github-known-hosts` and pre-migration container handling gone; a config still saying `legacy` is refused. An owner without the app gets `GH_TOKEN=<a PAT>` in `/persist/codespace/secrets/<name>`, as in real Codespaces; `up` warns about `GITHUB_TOKEN` in a secrets file, which git never reads (docs/GITHUB-APP.md §8) |
+| `vm leftovers` | `scripts/vm-control` | checks rather than assumes: files removed features left on `/persist`, launcher settings no longer read, containers whose mounts predate a change, the old password's journal, world-writable files in the checkouts — then anything on `/persist` the repo does not use. Names only; prints each fix, deletes nothing. New `/persist` paths go in its in-use lists (CLAUDE.md §10) |
+| Secrets in one directory | launcher, `modules/vm-control.nix` | `/persist/codespace/secrets/all` for every codespace, `secrets/<name>` per codespace, `0700`, denied to vm-control as one path. Per-codespace files used to sit in each state directory, readable through the socket. Secrets at an old path stop `up` with the `mv` to run. `config`, `secrets`, `all`, `code-server` reserved as codespace names |
+| umask 022 in codespaces | launcher | `docker exec` gave every process umask `0000`, so files were `0666` and directories `0777` — the flake checkout included, and `/etc/gitconfig`. Set in `/etc/profile.d/codespace.sh`, the editor's start and the launcher's root writes; the system gitconfig `chmod 0644` on every `up` (CLAUDE.md §8) |
+| `/persist/secrets` dropped | `modules/persist.nix` | a spare root-only directory from phase 1 that nothing used |
 | The VM on the app | `home/dev.nix`, `scripts/github-token-service` | the VM's git over https and `gh` on the account-wide token from the broker; the key only signs |
 | Codespaces parity for tokens | launcher, `scripts/github-token-service`, `scripts/git-credential-codespace` | other repositories from `customizations.codespaces.repositories`, approved at `up`; one token per permission set; read-only where you cannot push; revoked on `rm`/`rebuild`/`gc`; `app` the default |
 | Codespaces' own permissions | launcher (`SOURCE_PERMISSIONS`, `APP_PERMISSIONS`) | defaults and ceiling probed from a real codespace's token: workflows write by default, read on CI, deployments, discussions, pages; packages read by request. The app was raised first (docs/GITHUB-APP.md §4.1) |
 | Credential clients by unit | `modules/codespace-auth.nix` | `codespace-auth-clients.service` replaces tmpfiles `C+`, which a switch never re-ran (CLAUDE.md §8) |
 | 20 codespaces | launcher, `modules/editor-proxy.nix`, `hosts/dev/configuration.nix` | ports 8001–8020; the VirtualBox forwards for 8011–8020 are added by hand |
 | `/workspaces/.persist` | `templates/devcontainer.json` | a per-codespace volume outside the checkout that a rebuild keeps; the same path survives in real Codespaces |
-| Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers come up shell-only; leading-dot codespace names refused; no jq error for a codespace with no repo |
+| Smaller fixes | launcher, `modules/persist.nix` | `rm --repo` refuses before removing anything; key login via `/persist/ssh` (0711); pre-nginx containers refused with the rebuild to run; leading-dot codespace names refused; no jq error for a codespace with no repo |
 
 ### Next
 
+- **Delete `/persist/git/known_hosts`** once nothing mounts it. 13 codespaces
+  still do, harmlessly — GitHub's public host keys, read by nothing — and
+  docker would not start them with the file gone. Each mount goes at that
+  codespace's next `codespace rebuild`; `vm leftovers` says "not yet" until
+  then, and the plain `rm` after.
 - **Phase 4 of the GitHub App plan — two edges left**: whether a revoked
   scoped token is really dead (the broker now logs 204 apart from 404), and
   read-only planning against an organisation repository you can only read.
@@ -187,6 +196,17 @@ If you touch any of these, you can now test them properly rather than by proxy.
 - **`/workspaces/.persist`**: a file there survived `codespace rebuild` in a
   throwaway codespace on the template, writable without sudo; and
   `codespace up github.com/<you>/.github` is refused.
+- **The legacy cleanup, 2026-11-15/16**, checked with `vm leftovers` after
+  each `rebuild`: no container holds an SSH agent or key, none predates nginx
+  or the credential services, no removed setting is left in the config. The
+  old editor password's `pw` and `env`, a previous private key
+  (`id_ed25519.old`), a stray `secrets-1` and `/persist/secrets` were found
+  and deleted, and six codespaces' secrets moved to `/persist/codespace/secrets/`.
+- **umask 022**: after `rebuild` and `codespace up`, the dev-vm codespace's
+  shell and editor run with `022` and `/etc/gitconfig` is `0644`. `vm leftovers`
+  counted the damage — 146 world-writable entries in `/persist/dev-vm`,
+  178,662 in `repos`, 4,485 in `refs` — and `sudo chmod -R go-w` on all three
+  brought it to none.
 
 ### Pending a real run
 
@@ -427,6 +447,10 @@ CI-built image that fails is worse than no image, which is why §9 puts this las
   launcher rewrites the sources.
 - **The container dotfiles are optional here** and load-bearing in real
   Codespaces. Do not fold them into this repo; that portability is the point.
+- **In a codespace, `git config --global user.email` is empty** although
+  commits are authored correctly: the identity is an `include.path`, and a
+  lookup naming one scope skips includes. Ask `git config user.email`, no
+  scope flag (CLAUDE.md §8). Agents get this wrong.
 - **`git config --global` does not work on the VM.** home-manager owns
   `~/.config/git/config` as a read-only store symlink. Use
   `git config -f /persist/git/identity …`.
