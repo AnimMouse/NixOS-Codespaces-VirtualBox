@@ -211,6 +211,18 @@ cmd_leftovers() {
   [ -n "$newest" ] && hit "the journal still holds code-server-password entries, newest $newest — the old editor password" \
     "ages out with the journal; or sudo journalctl --rotate && sudo journalctl --vacuum-time=<age> to drop older files"
 
+  # Files made in codespaces before the launcher set umask 022: docker exec
+  # gave every process 0000, so the bind-mounted checkouts got world-writable
+  # files and directories — including the flake root rebuilds from. A count
+  # per tree, not a listing. Symlinks are always 0777 and do not count.
+  local tree n
+  for tree in /persist/dev-vm /persist/repos /persist/refs; do
+    [ -d "$tree" ] || continue
+    n=$(find "$tree" -xdev ! -type l -perm -o+w 2>/dev/null | wc -l)
+    [ "$n" -gt 0 ] && hit "$tree — $n world-writable file(s) or directories, from codespaces' old umask 0000" \
+      "chmod -R go-w $tree"
+  done
+
   # Then everything else: whatever is on /persist that the repo neither
   # creates nor knows about. The lists below are what is *in use*; anything
   # outside them and not already named above is reported by name, for you to
